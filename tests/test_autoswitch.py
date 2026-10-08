@@ -194,6 +194,106 @@ def harness(temp_home: Path) -> EngineHarness:
     return h
 
 
+class TestIdleRebalance:
+    """Quota fetches/refresh use fakes; switching writes isolated Linux files."""
+
+    def usage(self, h):
+        now = h.clock()
+        return {
+            "1": {"five_hour": {"pct": 10}, "seven_day": {"pct": 10, "resets_at": _iso_at(now + 7200)}},
+            "2": {"five_hour": {"pct": 20}, "seven_day": {"pct": 70, "resets_at": _iso_at(now + 3600)}},
+            "3": {"five_hour": {"pct": 30}, "seven_day": {"pct": 30, "resets_at": _iso_at(now + 3600)}},
+        }
+
+    def enable(self, h):
+        h.engine.settings = replace(h.settings, idle_rebalance=True, target_five_hour_max_pct=90)
+
+    def test_idle_prefers_soonest_weekly_reset_then_most_remaining(self, harness):
+        h = harness
+        self.enable(h)
+        with patch.object(h.engine, "_idle_ready", return_value=(True, "cold")), \
+             patch.object(h.engine, "_freshen_target", return_value="ok"):
+            assert h.tick_with_usage(self.usage(h)) is TickOutcome.SWITCHED
+            assert h.active_number() == 3
+            assert next(e for e in h.events if isinstance(e, SwitchEvent)).trigger == "idle-rebalance"
+            h.clock.advance(600)
+            assert h.tick_with_usage(self.usage(h)) is TickOutcome.NO_ACTION
+            assert h.active_number() == 3
+
+    @pytest.mark.parametrize("reason", ["session-busy-or-unknown", "session-cache-warm", "session-cache-unknown"])
+    def test_ordinary_below_threshold_tick_does_not_rebalance_when_guard_blocks(self, harness, reason):
+        self.enable(harness)
+        with patch.object(harness.engine, "_idle_ready", return_value=(False, reason)):
+            assert harness.tick_with_usage(self.usage(harness)) is TickOutcome.NO_ACTION
+            assert harness.active_number() == 1
+
+    def test_ceiling_excludes_best_weekly_candidate(self, harness):
+        self.enable(harness)
+        usage = self.usage(harness)
+        usage["3"]["five_hour"]["pct"] = 91
+        with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")), \
+             patch.object(harness.engine, "_freshen_target", return_value="ok"):
+            assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+            assert harness.active_number() == 2
+
+    def test_new_request_before_switch_cancels_rebalance(self, harness):
+        self.enable(harness)
+        with patch.object(harness.engine, "_idle_ready", side_effect=[(True, "cold"), (False, "busy")]), \
+             patch.object(harness.engine, "_freshen_target", return_value="ok"):
+            assert harness.tick_with_usage(self.usage(harness)) is TickOutcome.NO_ACTION
+            assert harness.active_number() == 1
+
+    def test_new_request_at_commit_recheck_cancels_rebalance(self, harness):
+        self.enable(harness)
+        with patch.object(harness.engine, "_idle_ready", side_effect=[(True, "cold"), (True, "cold"), (False, "busy")]), \
+             patch.object(harness.engine, "_freshen_target", return_value="ok"):
+            assert harness.tick_with_usage(self.usage(harness)) is TickOutcome.NO_ACTION
+            assert harness.active_number() == 1
+
+    def test_stale_peer_usage_does_not_select_another_peer(self, harness):
+        self.enable(harness)
+        entries = {n: _entry_for(row, harness.clock()) for n, row in self.usage(harness).items()}
+        entries["2"] = UsageEntry(last_good=self.usage(harness)["2"], fetched_at=0, age_s=1_000_000)
+        with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")):
+            assert harness.tick_with_entries(entries) is TickOutcome.NO_ACTION
+            assert harness.active_number() == 1
+
+    def test_unknown_weekly_reset_does_not_guess_ordering(self, harness):
+        self.enable(harness)
+        usage = self.usage(harness)
+        del usage["2"]["seven_day"]["resets_at"]
+        with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")):
+            assert harness.tick_with_usage(usage) is TickOutcome.NO_ACTION
+            assert harness.active_number() == 1
+
+    def test_equal_ranking_keeps_active_account(self, harness):
+        self.enable(harness)
+        usage = self.usage(harness)
+        usage["1"]["seven_day"] = dict(usage["3"]["seven_day"])
+        with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")):
+            assert harness.tick_with_usage(usage) is TickOutcome.NO_ACTION
+            assert harness.active_number() == 1
+
+    def test_existing_quota_switching_still_works_while_busy(self, harness):
+        self.enable(harness)
+        usage = self.usage(harness)
+        usage["1"]["five_hour"]["pct"] = 99
+        with patch.object(harness.engine, "_idle_ready", return_value=(False, "busy")), \
+             patch.object(harness.engine, "_freshen_target", return_value="ok"):
+            assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+            assert next(e for e in harness.events if isinstance(e, SwitchEvent)).trigger == "proactive"
+
+    def test_dry_run_decides_without_refresh_or_activation(self, harness):
+        self.enable(harness)
+        harness.engine.dry_run = True
+        with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")), \
+             patch.object(harness.engine, "_freshen_target") as freshen:
+            assert harness.tick_with_usage(self.usage(harness)) is TickOutcome.SWITCHED
+            assert harness.active_number() == 1
+            freshen.assert_not_called()
+            assert next(e for e in harness.events if isinstance(e, SwitchEvent)).dry_run is True
+
+
 class TestFiveHourLandingCeiling:
     @pytest.mark.parametrize("active_pct", [99, 100])
     def test_tick_waits_then_switches_after_reset(self, temp_home, active_pct):

@@ -40,6 +40,11 @@ def _args(**kwargs) -> argparse.Namespace:
 
 
 class TestLoadSettings:
+    def test_idle_rebalance_opt_in_is_persisted(self, tmp_path):
+        assert load_settings(tmp_path).idle_rebalance is False
+        set_setting(tmp_path, "autoswitch.idleRebalance", "true")
+        assert load_settings(tmp_path).idle_rebalance is True
+
     def test_five_hour_landing_ceiling_is_persisted(self, tmp_path):
         set_setting(tmp_path, "autoswitch.targetFiveHourMaxPct", "90")
         assert load_settings(tmp_path).target_five_hour_max_pct == 90

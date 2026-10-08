@@ -122,6 +122,23 @@ post-reset usage reading makes the account eligible again; a reset timestamp
 alone cannot bypass the ceiling. The default is 100 (no additional ceiling).
 Manual switches remain available.
 
+For idle preparation, enable `cswap config set autoswitch.idleRebalance true`
+and pipe the status line's JSON input to `cswap-cache-observe` (keep the
+existing status line output). This observer stores only session IDs, transcript
+paths, and cache timing metadata. Open clients are allowed: every tracked live
+session must report `idle` and have a known expired cache. Busy, waiting, missing,
+or unreadable session state prevents idle preparation. Closed sessions' caches
+are included too. Unobserved/changed transcripts and completed subagent
+transcripts conservatively wait one hour; unfinished subagents prevent it.
+
+Once idle, fresh usage is checked for all enabled OAuth accounts. The account
+whose weekly quota resets first wins; ties prefer the most weekly quota left,
+then the active account. The five-hour landing ceiling still applies. The
+engine rechecks idle state just before activation and observes its cooldown.
+This operates whenever idle, with no nightly time restriction. It does not
+alter the existing urgent quota/failover switching policy. The cache deadline
+is Claude Code's prediction, not a server-side cache-expiry confirmation.
+
 </details>
 
 ### Run multiple accounts at the same time (session mode)

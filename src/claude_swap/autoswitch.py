@@ -973,6 +973,8 @@ class AutoSwitchEngine:
             return TickOutcome.NO_ACTION
 
         active_headroom = headroom.get(current)
+        if settings.idle_rebalance and self._idle_ready()[0]:
+            return self._rebalance_idle(current, quarantined, state)
         if active_headroom is not None:
             self._unhealthy_ticks = 0
             self._idle_hold_since = None
@@ -1380,6 +1382,71 @@ class AutoSwitchEngine:
             return TickOutcome.ERROR
         self._emit(NoSwitchEvent(reason="no-viable-target"))
         return TickOutcome.BLOCKED
+
+    def _idle_ready(self) -> tuple[bool, str]:
+        from claude_swap.idle import idle_ready
+        from claude_swap.paths import get_claude_config_home, get_default_claude_config_home
+
+        profiles = [get_claude_config_home(), get_default_claude_config_home()]
+        profiles.extend(p for p in (self.switcher.backup_dir / "sessions").glob("*") if p.is_dir())
+        return idle_ready(list(dict.fromkeys(profiles)), self.switcher.backup_dir, self.clock())
+
+    def _rebalance_idle(self, current: str, quarantined: set[str], state: dict) -> TickOutcome:
+        """Prepare the next session without burning quota on a warm context."""
+        if self._in_cooldown(state):
+            self._emit(NoSwitchEvent(reason="cooldown"))
+            return TickOutcome.NO_ACTION
+        numbers = [
+            n for n in self.switcher.switchable_account_numbers()
+            if n not in quarantined and self.switcher.account_kind_for(n) != "api_key"
+        ]
+        entries = self.switcher.usage_entries_by_account(fetch={current, *numbers})
+        now = self.clock()
+        ranked = []
+        for num in numbers:
+            entry = entries.get(num)
+            if entry is None or not entry.fresh(now):
+                # Missing a peer could make an apparently best choice wrong.
+                self._emit(NoSwitchEvent(reason="idle-usage-stale"))
+                return TickOutcome.NO_ACTION
+            row = entry.decision_value()
+            if not isinstance(row, dict):
+                self._emit(NoSwitchEvent(reason="idle-usage-unknown"))
+                return TickOutcome.NO_ACTION
+            five = (row.get("five_hour") or {}).get("pct")
+            weekly = (row.get("seven_day") or {}).get("pct")
+            if any(isinstance(p, bool) or not isinstance(p, (int, float))
+                   or not math.isfinite(p) or not 0 <= p <= 100 for p in (five, weekly)):
+                self._emit(NoSwitchEvent(reason="idle-usage-unknown"))
+                return TickOutcome.NO_ACTION
+            h = oauth.account_headroom(row, self._models)
+            reset = _seven_day_reset_ts(row, now)
+            if h is None or h <= 0 or five > self.settings.target_five_hour_max_pct:
+                continue
+            if reset is None:
+                self._emit(NoSwitchEvent(reason="idle-reset-unknown"))
+                return TickOutcome.NO_ACTION
+            # Earliest weekly reset, then MOST remaining weekly quota. Keep
+            # the active account when both are tied so repeated ticks are stable.
+            ranked.append(((reset, weekly, num != current), num))
+        ranked.sort()
+        if not ranked or ranked[0][1] == current:
+            self._emit(NoSwitchEvent(reason="idle-already-best"))
+            return TickOutcome.NO_ACTION
+        num = ranked[0][1]
+        email = self.switcher.account_email(num)
+        if not self.dry_run:
+            status = self._freshen_target(num, email)
+            if status != "ok":
+                if status in ("invalid_grant", "identity-conflict"):
+                    self._quarantine(num, email, status)
+                self._emit(NoSwitchEvent(reason="idle-target-unavailable", detail=status))
+                return TickOutcome.NO_ACTION
+        active_usage = entries.get(current)
+        active_row = active_usage.decision_value() if active_usage else None
+        left = (oauth.account_headroom(active_row, self._models),
+                _binding_recovery_ts(active_row, self._models, now))
+        return self._perform(num, email, "idle-rebalance", left)
 
     def _no_return_account(
         self,
@@ -2112,6 +2179,9 @@ class AutoSwitchEngine:
         trigger: str,
         left: tuple[float | None, float],
     ) -> TickOutcome:
+        if trigger == "idle-rebalance" and not self._idle_ready()[0]:
+            self._emit(NoSwitchEvent(reason="idle-state-changed"))
+            return TickOutcome.NO_ACTION
         if self.dry_run:
             current = self.switcher.current_account_number()
             current_email = self.switcher.account_email(current) if current else ""
@@ -2133,8 +2203,11 @@ class AutoSwitchEngine:
         # state lock.
         with self._state_lock():
             state = self._read_state()
-            if trigger in ("proactive", "consume-first") and self._in_cooldown(state):
+            if trigger in ("proactive", "consume-first", "idle-rebalance") and self._in_cooldown(state):
                 self._emit(NoSwitchEvent(reason="cooldown"))
+                return TickOutcome.NO_ACTION
+            if trigger == "idle-rebalance" and not self._idle_ready()[0]:
+                self._emit(NoSwitchEvent(reason="idle-state-changed"))
                 return TickOutcome.NO_ACTION
 
             result = self.switcher.switch_to(number, json_output=True)
