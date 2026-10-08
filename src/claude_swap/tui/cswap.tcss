@@ -147,10 +147,15 @@ MenuItem Static.menu-item-muted { color: $secondary; }
 
 /* -- modals ----------------------------------------------------------------- */
 
-ConfirmModal, AddTokenModal, OutputModal {
+ConfirmModal, AddTokenModal, OutputModal, SessionInfoModal {
     align: center middle;
     background: $background 60%;
 }
+
+SessionInfoModal .modal-box { height: 80%; padding: 0 1; }
+SessionInfoModal .modal-output { height: 1fr; max-height: 100%; padding: 0; }
+SessionInfoModal .modal-title { margin-bottom: 0; }
+SessionInfoModal .modal-buttons, SessionInfoModal .modal-hint { margin-top: 0; }
 
 .modal-box {
     width: 64;

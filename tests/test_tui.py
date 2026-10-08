@@ -791,7 +791,12 @@ class TestSessionsScreen:
             assert isinstance(app.screen, OutputModal)
             assert "94%" in app.screen._output and "#2 → #1" in app.screen._output
             assert "estimates" in app.screen._output and "5s" in app.screen._output
-            await pilot.press("escape")
+            close = app.screen.query_one("#close", Button)
+            assert close.region.bottom <= app.screen.size.height
+            assert close.region.y >= 0
+            await pilot.click("#close")
+            await settle(pilot)
+            assert app.screen is screen
             table.focus()
             await pilot.press("enter")
             await settle(pilot)

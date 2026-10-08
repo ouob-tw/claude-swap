@@ -89,6 +89,10 @@ def collect_status(root: Path, now: float) -> dict:
             "reason": REASONS.get(observation.reason, observation.reason), "rows": rows, "errors": errors, "last": last}
 
 
+class SessionInfoModal(OutputModal):
+    """Use the existing output popup with space reserved for small-screen controls."""
+
+
 class SessionsScreen(Screen):
     BINDINGS = [Binding("escape", "app.pop_screen", "Back"), Binding("h", "help", "Help"),
                 Binding("q", "app.quit", "Quit")]
@@ -176,7 +180,7 @@ class SessionsScreen(Screen):
             table.scroll_to(y=scroll_y, animate=False)
 
     def action_help(self) -> None:
-        self.app.push_screen(OutputModal("Session / cache help", self._details))
+        self.app.push_screen(SessionInfoModal("Session / cache help", self._details))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "sessions-help":
@@ -186,7 +190,7 @@ class SessionsScreen(Screen):
         if self._data is None:
             return
         sid, project, status, cache, expiry, remaining = self._data["rows"][event.cursor_row]
-        self.app.push_screen(OutputModal("Session / cache details", (
+        self.app.push_screen(SessionInfoModal("Session / cache details", (
             f"Session: {sid}\nProject: {project}\nState: {status}\nCache: {cache}\n"
             f"Expiry (local, estimated): {expiry}\nRemaining: {remaining}")))
 
