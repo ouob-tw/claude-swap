@@ -40,6 +40,12 @@ def _args(**kwargs) -> argparse.Namespace:
 
 
 class TestLoadSettings:
+    @pytest.mark.parametrize("text", ["broken", "[]", '{"autoswitch": []}'])
+    def test_strict_display_reader_reports_invalid_settings(self, tmp_path, text):
+        settings_path(tmp_path).write_text(text)
+        with pytest.raises(ValueError):
+            load_settings(tmp_path, strict=True)
+
     def test_idle_rebalance_opt_in_is_persisted(self, tmp_path):
         assert load_settings(tmp_path).idle_rebalance is False
         set_setting(tmp_path, "autoswitch.idleRebalance", "true")

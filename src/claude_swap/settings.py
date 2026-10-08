@@ -212,25 +212,31 @@ def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
     return AutoSwitchSettings(**kwargs)
 
 
-def _read_raw(path: Path) -> dict:
+def _read_raw(path: Path, *, strict: bool = False) -> dict:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        if strict:
+            raise
         _logger.warning("Could not read %s (%s); using defaults", path, e)
         return {}
     if not isinstance(raw, dict):
+        if strict:
+            raise ValueError("settings must be a JSON object")
         _logger.warning("%s is not a JSON object; using defaults", path)
         return {}
     return raw
 
 
-def load_settings(backup_root: Path) -> AutoSwitchSettings:
+def load_settings(backup_root: Path, *, strict: bool = False) -> AutoSwitchSettings:
     """Load the autoswitch section; missing/corrupt file or fields → defaults."""
-    raw = _read_raw(settings_path(backup_root))
+    raw = _read_raw(settings_path(backup_root), strict=strict)
     section = raw.get("autoswitch")
     if not isinstance(section, dict):
+        if strict and "autoswitch" in raw:
+            raise ValueError("autoswitch settings must be an object")
         return AutoSwitchSettings()
     kwargs = {}
     for field, json_key in _AUTOSWITCH_KEYS.items():

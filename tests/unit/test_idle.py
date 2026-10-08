@@ -118,3 +118,60 @@ def test_status_panel_uses_same_cache_deadline_and_guard(observation, monkeypatc
     assert cold["rows"][0][-1] == "0s"
     os.utime(transcript, (1900, 1900))
     assert sessions.collect_status(root, 2000)["rows"][0][3] == "warm"
+
+
+def test_status_panel_does_not_infer_closed_from_unreadable_session(observation, monkeypatch):
+    from claude_swap.tui import sessions
+    config, root, _, _ = observation
+    monkeypatch.setattr(sessions, "tracked_config_dirs", lambda root: [config])
+    monkeypatch.setattr(sessions, "service_status", lambda: "unavailable")
+    (config / "sessions" / "123.json").write_text("broken")
+    report = sessions.collect_status(root, 2000)
+    assert report["rows"][0][2] == "unknown"
+    assert report["errors"] > 0
+    assert not report["ready"]
+
+
+def test_status_panel_marks_corrupt_settings_unknown(observation, monkeypatch):
+    from claude_swap.tui import sessions
+    config, root, _, _ = observation
+    monkeypatch.setattr(sessions, "tracked_config_dirs", lambda root: [config])
+    monkeypatch.setattr(sessions, "service_status", lambda: "unavailable")
+    (root / "settings.json").write_text("broken")
+    report = sessions.collect_status(root, 2000)
+    assert report["enabled"] is None and report["ceiling"] is None
+    assert report["errors"] > 0
+
+
+def test_closed_session_uses_recorded_cwd_not_encoded_directory(observation, monkeypatch):
+    from claude_swap.tui import sessions
+    config, root, _, data = observation
+    monkeypatch.setattr(sessions, "tracked_config_dirs", lambda root: [config])
+    monkeypatch.setattr(sessions, "service_status", lambda: "unavailable")
+    monkeypatch.setattr("claude_swap.process_detection.is_pid_alive", lambda pid: False)
+    data["cwd"] = "/projects/my-project"
+    record_status(data, root, 1500)
+    assert sessions.collect_status(root, 2000)["rows"][0][1] == "my-project"
+
+
+def test_unknown_closed_project_is_not_guessed(observation, monkeypatch):
+    from claude_swap.tui import sessions
+    config, root, _, _ = observation
+    monkeypatch.setattr(sessions, "tracked_config_dirs", lambda root: [config])
+    monkeypatch.setattr(sessions, "service_status", lambda: "unavailable")
+    monkeypatch.setattr("claude_swap.process_detection.is_pid_alive", lambda pid: False)
+    assert sessions.collect_status(root, 2000)["rows"][0][1] == "unknown"
+
+
+@pytest.mark.parametrize("expiry", [False, float("inf"), "broken"])
+def test_invalid_deadline_cannot_appear_expired(observation, monkeypatch, expiry):
+    from claude_swap.tui import sessions
+    config, root, _, _ = observation
+    monkeypatch.setattr(sessions, "tracked_config_dirs", lambda root: [config])
+    monkeypatch.setattr(sessions, "service_status", lambda: "unavailable")
+    path = next((root / "prompt-cache").glob("*.json"))
+    row = json.loads(path.read_text()); row["expires_at"] = expiry
+    path.write_text(json.dumps(row))
+    report = sessions.collect_status(root, 2000)
+    assert report["rows"][0][3] == "unknown"
+    assert not report["ready"]

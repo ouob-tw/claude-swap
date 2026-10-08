@@ -729,6 +729,12 @@ class TestSessionsScreen:
             assert table.get_row_at(0)[0] == "example-id"
             assert app._store_only is True
             assert not any(call[0] in ("switch", "switch_to") for call in fake.calls)
+            app._last_refresh_error = "failed account refresh"
+            app.screen._apply(data)
+            summary = str(app.screen.query_one("#sessions-summary", Static).render())
+            assert "unavailable (last known #1)" in summary
+            app.screen._failed("OSError")
+            assert table.row_count == 0
             data["rows"] = []
             app.screen._refresh_status()
             await settle(pilot)

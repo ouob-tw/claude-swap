@@ -13,11 +13,12 @@ import math
 import sys
 import time
 from pathlib import Path
+from dataclasses import dataclass, field
 
 from claude_swap.paths import get_backup_root, get_claude_config_home, get_default_claude_config_home
 from claude_swap.locking import FileLock
 from claude_swap.exceptions import LockError
-from claude_swap.process_detection import scan_sessions, is_pid_alive
+from claude_swap.process_detection import ClaudeSession, scan_sessions, is_pid_alive
 from claude_swap.settings import atomic_write_json
 
 QUIET_FALLBACK_S = 3600
@@ -32,7 +33,8 @@ def tracked_config_dirs(root: Path) -> list[Path]:
 def transcript_deadline(transcript: Path, record: dict | None) -> float:
     mtime = transcript.stat().st_mtime
     if record and record.get("known") is True and mtime <= record["transcript_mtime"]:
-        return record.get("expires_at") or 0
+        expiry = record["expires_at"]
+        return 0 if expiry is None else expiry
     return mtime + QUIET_FALLBACK_S
 
 
@@ -66,6 +68,7 @@ def record_status(data: dict, root: Path, now: float) -> None:
             "session_id": sid, "transcript_path": transcript,
             "known": known, "expires_at": expiry, "observed_at": now,
             "transcript_mtime": Path(transcript).stat().st_mtime,
+            "cwd": data.get("workspace", {}).get("current_dir") or data.get("cwd"),
         })
 
 
@@ -85,48 +88,83 @@ def _subagent_finished(path: Path) -> bool:
     return False
 
 
-def idle_ready(config_dirs: list[Path], root: Path, now: float) -> tuple[bool, str]:
-    """Fail closed on busy/unknown sessions, live subagents, or warm caches."""
+@dataclass
+class IdleObservation:
+    records: list[dict] = field(default_factory=list)
+    sessions: list[ClaudeSession] = field(default_factory=list)
+    deadlines: dict[Path, float] = field(default_factory=dict)
+    ready: bool = False
+    reason: str = "session-state-unknown"
+    unreadable: int = 0
+
+
+def observe_idle(config_dirs: list[Path], root: Path, now: float) -> IdleObservation:
+    """One read shared by the switching guard and the status panel."""
+    result = IdleObservation()
+    problem = None
+    for path in (root / "prompt-cache").glob("*.json"):
+        try:
+            record = json.loads(path.read_text())
+            if not isinstance(record.get("session_id"), str) or not isinstance(record.get("transcript_path"), str):
+                raise ValueError("invalid cache record")
+            result.records.append(record)
+        except (OSError, ValueError, TypeError, AttributeError):
+            result.unreadable += 1
+            problem = "session-state-unknown"
     try:
-        records = [json.loads(p.read_text()) for p in (root / "prompt-cache").glob("*.json")]
-        by_session = {r["session_id"]: r for r in records}
-        by_transcript = {Path(r["transcript_path"]): r for r in records}
-        live = []
         for config in config_dirs:
             sessions, unreadable = scan_sessions(config)
+            result.sessions.extend(sessions)
+            result.unreadable += unreadable
             if unreadable:
-                return False, "session-state-unknown"
+                problem = "session-state-unknown"
             for lock in (config / "ide").glob("*.lock"):
                 if is_pid_alive(json.loads(lock.read_text())["pid"]) and not sessions:
-                    return False, "ide-session-unknown"
-            live.extend(sessions)
-        for session in live:
-            if session.status != "idle":
-                return False, "session-busy-or-unknown"
-            record = by_session.get(session.session_id)
-            if not record or record.get("known") is not True:
-                return False, "session-cache-unknown"
-            transcript = Path(record["transcript_path"])
-            if not transcript.is_file():
-                return False, "session-transcript-unknown"
-            for child in (transcript.parent / session.session_id / "subagents").glob("*.jsonl"):
-                if not _subagent_finished(child):
-                    return False, "subagent-busy-or-unknown"
-        # Closed sessions still have caches. Include all configured profiles
-        # and subagent transcripts, including sessions predating this observer.
+                    problem = "ide-session-unknown"
+        by_session = {r["session_id"]: r for r in result.records}
+        by_transcript = {Path(r["transcript_path"]): r for r in result.records}
         transcripts = set(by_transcript)
         for config in config_dirs:
             transcripts.update((config / "projects").rglob("*.jsonl"))
         for transcript in transcripts:
-            record = by_transcript.get(transcript)
-            expiry = transcript_deadline(transcript, record)
-            if not isinstance(expiry, (int, float)) or not math.isfinite(expiry):
-                return False, "session-cache-unknown"
-            if expiry > now:
-                return False, "session-cache-warm"
-        return True, "all-sessions-idle-and-cold"
+            try:
+                expiry = transcript_deadline(transcript, by_transcript.get(transcript))
+                if isinstance(expiry, bool) or not isinstance(expiry, (int, float)) or not math.isfinite(expiry):
+                    raise ValueError("invalid cache deadline")
+                result.deadlines[transcript] = expiry
+            except (OSError, ValueError, TypeError, KeyError):
+                problem = "session-state-unknown"
+                result.unreadable += 1
+        if problem:
+            result.reason = problem
+            return result
+        for session in result.sessions:
+            if session.status != "idle":
+                result.reason = "session-busy-or-unknown"
+                return result
+            record = by_session.get(session.session_id)
+            if not record or record.get("known") is not True:
+                result.reason = "session-cache-unknown"
+                return result
+            transcript = Path(record["transcript_path"])
+            for child in (transcript.parent / session.session_id / "subagents").glob("*.jsonl"):
+                if not _subagent_finished(child):
+                    result.reason = "subagent-busy-or-unknown"
+                    return result
+        if any(expiry > now for expiry in result.deadlines.values()):
+            result.reason = "session-cache-warm"
+            return result
+        result.ready = True
+        result.reason = "all-sessions-idle-and-cold"
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
-        return False, "session-state-unknown"
+        result.unreadable += 1
+        result.reason = "session-state-unknown"
+    return result
+
+
+def idle_ready(config_dirs: list[Path], root: Path, now: float) -> tuple[bool, str]:
+    observation = observe_idle(config_dirs, root, now)
+    return observation.ready, observation.reason
 
 
 def main() -> None:

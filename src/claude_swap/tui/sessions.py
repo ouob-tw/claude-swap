@@ -12,8 +12,7 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
-from claude_swap.idle import idle_ready, tracked_config_dirs, transcript_deadline
-from claude_swap.process_detection import scan_sessions
+from claude_swap.idle import observe_idle, tracked_config_dirs
 from claude_swap.settings import load_settings
 from claude_swap.tui.data import format_duration
 
@@ -43,39 +42,33 @@ def service_status() -> str:
 
 def collect_status(root: Path, now: float) -> dict:
     configs = tracked_config_dirs(root)
-    ready, reason = idle_ready(configs, root, now)
-    settings = load_settings(root)
-    records = {}
-    errors = 0
-    for path in (root / "prompt-cache").glob("*.json"):
-        try:
-            record = json.loads(path.read_text())
-            records[record["session_id"]] = record
-        except (OSError, ValueError, TypeError, KeyError):
-            errors += 1
-    live = {}
-    for config in configs:
-        sessions, unreadable = scan_sessions(config)
-        errors += unreadable
-        live.update((s.session_id, s) for s in sessions)
+    observation = observe_idle(configs, root, now)
+    errors = observation.unreadable
+    try:
+        settings = load_settings(root, strict=True)
+    except (OSError, ValueError, TypeError):
+        settings = None
+        errors += 1
+    records = {r["session_id"]: r for r in observation.records}
+    live = {s.session_id: s for s in observation.sessions}
     rows = []
     for sid in sorted(set(records) | set(live), key=lambda sid: (sid not in live, sid)):
         session = live.get(sid)
         record = records.get(sid)
-        status = (session.status or "unknown") if session else "closed"
+        status = (session.status or "unknown") if session else ("unknown" if observation.unreadable else "closed")
         deadline = None
         cache = "unknown"
         project = Path(session.cwd).name if session and session.cwd else "—"
         if record:
             try:
                 transcript = Path(record["transcript_path"])
-                deadline = transcript_deadline(transcript, record)
-                if session and record.get("known") is not True:
+                deadline = observation.deadlines.get(transcript)
+                if deadline is None or (session and record.get("known") is not True):
                     deadline = None
                 else:
                     cache = "warm" if deadline > now else "expired (est.)"
                 if project == "—":
-                    project = transcript.parent.name
+                    project = Path(record["cwd"]).name if isinstance(record.get("cwd"), str) else "unknown"
             except (OSError, TypeError, KeyError, ValueError):
                 errors += 1
         clock = datetime.fromtimestamp(deadline).strftime("%m-%d %H:%M:%S") if deadline else "—"
@@ -88,9 +81,9 @@ def collect_status(root: Path, now: float) -> dict:
                 f"{datetime.fromtimestamp(switched_at).strftime('%m-%d %H:%M:%S')} · {state.get('leftTrigger', 'unknown')}") if switched_at else "none recorded"
     except (OSError, ValueError, TypeError, AttributeError):
         last = "unavailable"
-    return {"service": service_status(), "enabled": settings.idle_rebalance,
-            "ceiling": settings.target_five_hour_max_pct, "ready": ready,
-            "reason": REASONS.get(reason, reason), "rows": rows, "errors": errors, "last": last}
+    return {"service": service_status(), "enabled": settings.idle_rebalance if settings else None,
+            "ceiling": settings.target_five_hour_max_pct if settings else None, "ready": observation.ready,
+            "reason": REASONS.get(observation.reason, observation.reason), "rows": rows, "errors": errors, "last": last}
 
 
 class SessionsScreen(Screen):
@@ -131,9 +124,16 @@ class SessionsScreen(Screen):
         self._refreshing = False
         if not self.is_mounted:
             return
-        current = self.app.snapshot.active_number if self.app.snapshot else "unknown"
-        summary = (f"Service: {data['service']} · Current account: #{current}\n"
-                   f"Idle preparation: {'enabled' if data['enabled'] else 'disabled'} · 5h target ceiling: {data['ceiling']:g}%\n"
+        snap = self.app.snapshot
+        current = f"#{snap.active_number}" if snap and snap.active_number else "none"
+        if snap is None:
+            current = "unknown"
+        elif self.app._last_refresh_error or time.time() - snap.taken_at >= self.app.SNAPSHOT_AGE_NOTE_S:
+            current = f"unavailable (last known #{snap.active_number})"
+        enabled = "enabled" if data["enabled"] is True else ("disabled" if data["enabled"] is False else "unknown")
+        ceiling = f"{data['ceiling']:g}%" if data["ceiling"] is not None else "unknown"
+        summary = (f"Service: {data['service']} · Current account: {current}\n"
+                   f"Idle preparation: {enabled} · 5h target ceiling: {ceiling}\n"
                    f"Session check {'clear' if data['ready'] else 'blocked'}: {data['reason']}\n"
                    f"Last switch: {data['last']}\n"
                    f"Sessions: {len(data['rows'])} · unreadable records: {data['errors']}")
@@ -151,3 +151,4 @@ class SessionsScreen(Screen):
         if not self.is_mounted:
             return
         self.query_one("#sessions-summary", Static).update(f"Status unavailable ({error}); retrying. Idle preparation is not confirmed.")
+        self.query_one(DataTable).clear()
