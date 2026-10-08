@@ -6,20 +6,29 @@ Screen {
     background: $background;
 }
 
+#sessions-header { height: 1; margin: 0 1; }
+
 #sessions-title {
     height: 1;
-    margin: 1 2;
+    width: 1fr;
     color: $primary;
     text-style: bold;
 }
 
+#sessions-help {
+    border: none;
+    height: 1;
+    min-width: 6;
+    width: 8;
+    padding: 0 1;
+}
+
 #sessions-summary {
     height: auto;
-    margin: 0 2 1 2;
+    margin: 0 1;
 }
 
 #sessions-table { height: 1fr; }
-#sessions-note { height: auto; margin: 1 2; color: $secondary; }
 
 /* -- accounts panel (the always-visible monitor) --------------------------- */
 

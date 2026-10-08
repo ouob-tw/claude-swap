@@ -723,10 +723,11 @@ class TestSessionsScreen:
             await settle(pilot)
             assert isinstance(app.screen, sessions.SessionsScreen)
             summary = str(app.screen.query_one("#sessions-summary", Static).render())
-            assert "active / running" in summary and "90%" in summary
+            assert "active / running" in summary and "90%" not in summary
+            assert "90%" in app.screen.query_one("#sessions-summary", Static).tooltip
             assert "blocked" in summary and "busy" in summary
             table = app.screen.query_one(DataTable)
-            assert table.get_row_at(0)[0] == "example-id"
+            assert table.get_row_at(0)[0].plain == "example-id"
             assert app._store_only is True
             assert not any(call[0] in ("switch", "switch_to") for call in fake.calls)
             app._last_refresh_error = "failed account refresh"
@@ -759,6 +760,57 @@ class TestSessionsScreen:
             text = str(app.screen.query_one("#sessions-summary", Static).render())
             assert "unavailable" in text and "private details" not in text
             assert app.screen._refreshing is False
+
+    @pytest.mark.parametrize("width", [60, 80])
+    async def test_compact_layout_help_and_row_details(self, tmp_path, monkeypatch, width):
+        from claude_swap.tui import sessions
+        from claude_swap.tui.modals import OutputModal
+        from textual.widgets import Button, DataTable, Static
+
+        project = "a-very-long-project-name-that-must-not-widen-the-table"
+        data = {"service": "active / running", "enabled": True, "ceiling": 94,
+                "ready": False, "reason": "A session cache is still warm",
+                "rows": [("example-id", project, "idle", "warm", "10-09 18:00:00", "20m")] * 12,
+                "errors": 0, "last": "#2 → #1"}
+        monkeypatch.setattr(sessions, "collect_status", lambda root, now: data)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(width, 18)) as pilot:
+            await settle(pilot)
+            await pilot.press("c")
+            await settle(pilot)
+            screen = app.screen
+            table = screen.query_one(DataTable)
+            assert table.virtual_size.width <= table.size.width
+            assert table.size.height >= 10
+            assert len(table.columns) == (5 if width >= 80 else 4)
+            assert "Last switch" not in str(screen.query_one("#sessions-summary", Static).render())
+            assert screen.query_one("#sessions-help", Button).tooltip
+            await pilot.click("#sessions-help")
+            await settle(pilot)
+            assert isinstance(app.screen, OutputModal)
+            assert "94%" in app.screen._output and "#2 → #1" in app.screen._output
+            assert "estimates" in app.screen._output and "5s" in app.screen._output
+            await pilot.press("escape")
+            table.focus()
+            await pilot.press("enter")
+            await settle(pilot)
+            assert isinstance(app.screen, OutputModal)
+            assert project in app.screen._output and "10-09 18:00:00" in app.screen._output
+            await pilot.press("escape")
+            await pilot.resize_terminal(80 if width == 60 else 60, 18)
+            await settle(pilot)
+            assert len(table.columns) == (5 if width == 60 else 4)
+            assert table.virtual_size.width <= table.size.width
+            await pilot.press("h")
+            await settle(pilot)
+            assert isinstance(app.screen, OutputModal)
+            await pilot.press("escape")
+            screen._failed("OSError")
+            screen.action_help()
+            await settle(pilot)
+            assert "unavailable" in app.screen._output and "#2 → #1" not in app.screen._output
+            assert not any(call[0] in ("switch", "switch_to") for call in fake.calls)
 
 
 @pytest.mark.asyncio

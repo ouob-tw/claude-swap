@@ -7,14 +7,17 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Static
+from textual.widgets import Button, DataTable, Footer, Static
 
 from claude_swap.idle import observe_idle, tracked_config_dirs
 from claude_swap.settings import load_settings
 from claude_swap.tui.data import format_duration
+from claude_swap.tui.modals import OutputModal
 
 REASONS = {
     "all-sessions-idle-and-cold": "All sessions idle; caches expired (estimated)",
@@ -87,20 +90,24 @@ def collect_status(root: Path, now: float) -> dict:
 
 
 class SessionsScreen(Screen):
-    BINDINGS = [Binding("escape", "app.pop_screen", "Back"), Binding("q", "app.quit", "Quit")]
+    BINDINGS = [Binding("escape", "app.pop_screen", "Back"), Binding("h", "help", "Help"),
+                Binding("q", "app.quit", "Quit")]
 
     def compose(self) -> ComposeResult:
-        yield Static("Session / cache status", id="sessions-title")
+        with Horizontal(id="sessions-header"):
+            yield Static("Session / cache status", id="sessions-title")
+            yield Button("Help", id="sessions-help", tooltip="Settings, last switch and cache explanations (h)")
         yield Static("Loading…", id="sessions-summary", markup=False)
         yield DataTable(id="sessions-table", zebra_stripes=True, cursor_type="row")
-        yield Static("Read-only · auto-refresh 5s · deadlines are estimates; unknown data blocks idle preparation", id="sessions-note", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
         self._refreshing = False
+        self._data = None
+        self._details = "Status unavailable; waiting for a successful refresh."
         self._previous_store_only = self.app._store_only
         self.app.set_store_only(True)
-        self.query_one(DataTable).add_columns("Session", "Project", "State", "Cache", "Expiry (local)", "Remaining")
+        self.query_one(DataTable).tooltip = "Cache expiry is estimated. Select a row and press Enter for details."
         self.set_interval(5, self._refresh_status)
         self._refresh_status()
 
@@ -132,23 +139,63 @@ class SessionsScreen(Screen):
             current = f"unavailable (last known #{snap.active_number})"
         enabled = "enabled" if data["enabled"] is True else ("disabled" if data["enabled"] is False else "unknown")
         ceiling = f"{data['ceiling']:g}%" if data["ceiling"] is not None else "unknown"
-        summary = (f"Service: {data['service']} · Current account: {current}\n"
-                   f"Idle preparation: {enabled} · 5h target ceiling: {ceiling}\n"
-                   f"Session check {'clear' if data['ready'] else 'blocked'}: {data['reason']}\n"
-                   f"Last switch: {data['last']}\n"
-                   f"Sessions: {len(data['rows'])} · unreadable records: {data['errors']}")
+        summary = (f"Account: {current} · Service: {data['service']}\n"
+                   f"Session check {'clear' if data['ready'] else 'blocked'}: {data['reason']}")
+        if data['errors']:
+            summary += f"\nUnreadable records: {data['errors']}"
+        self._details = (f"{summary}\nIdle preparation: {enabled} · 5h target ceiling: {ceiling}\n"
+                         f"Last switch: {data['last']}\n"
+                         f"Sessions: {len(data['rows'])} · unreadable records: {data['errors']}\n\n"
+                         "Read-only · auto-refresh 5s\nCache deadlines are estimates, not confirmed server expiry.\n"
+                         "Unknown data blocks idle preparation. A clear session check does not confirm quota eligibility.\n"
+                         "On narrow screens, Session IDs are shown only in row details. Select a row and press Enter.")
         self.query_one("#sessions-summary", Static).update(summary)
+        self.query_one("#sessions-summary", Static).tooltip = self._details
+        self._data = data
+        self._render_table()
+
+    def on_resize(self) -> None:
+        if getattr(self, "_data", None) is not None:
+            self._render_table()
+
+    def _render_table(self) -> None:
         table = self.query_one(DataTable)
         cursor, scroll_y = table.cursor_row, table.scroll_y
-        table.clear()
-        table.add_rows(data["rows"])
+        show_id = self.size.width >= 80
+        widths = [("Session", 12)] if show_id else []
+        project_width = max(8, min(28, self.size.width - (49 if show_id else 35)))
+        widths += [("Project", project_width), ("State", 7), ("Cache", 7), ("Remaining", 9)]
+        table.clear(columns=True)
+        for label, width in widths:
+            table.add_column(label, width=width)
+        for sid, project, status, cache, expiry, remaining in self._data["rows"]:
+            cells = ([sid] if show_id else []) + [project, status, "expired" if cache == "expired (est.)" else cache, remaining]
+            table.add_row(*(Text(cell, overflow="ellipsis", no_wrap=True) for cell in cells))
         if table.row_count:
             table.move_cursor(row=min(cursor, table.row_count - 1), animate=False, scroll=False)
             table.scroll_to(y=scroll_y, animate=False)
+
+    def action_help(self) -> None:
+        self.app.push_screen(OutputModal("Session / cache help", self._details))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "sessions-help":
+            self.action_help()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if self._data is None:
+            return
+        sid, project, status, cache, expiry, remaining = self._data["rows"][event.cursor_row]
+        self.app.push_screen(OutputModal("Session / cache details", (
+            f"Session: {sid}\nProject: {project}\nState: {status}\nCache: {cache}\n"
+            f"Expiry (local, estimated): {expiry}\nRemaining: {remaining}")))
 
     def _failed(self, error: str) -> None:
         self._refreshing = False
         if not self.is_mounted:
             return
-        self.query_one("#sessions-summary", Static).update(f"Status unavailable ({error}); retrying. Idle preparation is not confirmed.")
+        self._data = None
+        self._details = f"Status unavailable ({error}); retrying. Idle preparation is not confirmed."
+        self.query_one("#sessions-summary", Static).update(self._details)
+        self.query_one("#sessions-summary", Static).tooltip = self._details
         self.query_one(DataTable).clear()

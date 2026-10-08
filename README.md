@@ -191,6 +191,8 @@ Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usag
 
 Press `c` on the main menu to open **Session / cache status**. This read-only page refreshes every five seconds and shows the auto-switch service, session activity, estimated cache expiry, and the reason idle preparation is blocked. Unreadable or stale data is marked unknown or unavailable. Press Escape to return.
 
+Click **Help** (or press `h`) for settings, the last switch, and cache explanations. Select a table row and press Enter for its expiry time and details. Narrow terminals hide the Session ID column and shorten long project names; the row details retain the information.
+
 <img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
 ### Refresh expired tokens
