@@ -24,6 +24,7 @@ from claude_swap.settings import load_settings, load_ui_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui.autoview import AutoScreen
 from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
+from claude_swap.tui.sessions import SessionsScreen
 from claude_swap.tui.data import ActionResult, SnapshotSource, format_duration, run_action
 from claude_swap.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
 from claude_swap.tui.theme import CSWAP_DARK, CSWAP_LIGHT
@@ -403,6 +404,10 @@ class CswapApp(App):
         if isinstance(self.screen, WatchScreen):
             return
         self.push_screen(WatchScreen())
+
+    def action_open_sessions(self) -> None:
+        if not isinstance(self.screen, SessionsScreen):
+            self.push_screen(SessionsScreen())
 
     # -- theme --------------------------------------------------------------
 

@@ -46,6 +46,7 @@ class DashboardScreen(Screen):
         Binding("q", "app.quit", "Quit"),
         # Power shortcuts; the menu is the discoverable path.
         Binding("g", "app.open_auto", "Auto view", show=False),
+        Binding("c", "app.open_sessions", "Sessions / cache"),
         Binding("f", "app.refresh_full", "Refresh usage", show=False),
         Binding("j", "cursor_down", show=False),
         Binding("k", "cursor_up", show=False),
@@ -77,6 +78,7 @@ class DashboardScreen(Screen):
             ("Switch account…", "switch"),
             ("Watch accounts", "watch"),
             ("Auto-switch view", "auto"),
+            ("Session / cache status", "sessions"),
             ("Add account…", "add-menu"),
             ("Disable / enable account…", "disable-menu"),
             ("Remove account…", "remove-menu"),
@@ -161,6 +163,7 @@ class DashboardScreen(Screen):
             "switch": self.action_open_switch,
             "watch": app.action_open_watch,
             "auto": app.action_open_auto,
+            "sessions": app.action_open_sessions,
             "add-login": app.action_add_current,
             "add-token": app.action_add_token,
             "quit": app.exit,

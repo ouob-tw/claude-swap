@@ -101,3 +101,20 @@ def test_first_observation_without_deadline_preserves_possible_old_cache(observa
     data["prompt_cache"] = {"expires_at": None, "caching_observed": True}
     record_status(data, root, 1500)
     assert idle_ready([config], root, 2000)[0] is False
+
+
+def test_status_panel_uses_same_cache_deadline_and_guard(observation, monkeypatch):
+    from claude_swap.tui import sessions
+
+    config, root, transcript, _ = observation
+    monkeypatch.setattr(sessions, "tracked_config_dirs", lambda root: [config])
+    monkeypatch.setattr(sessions, "service_status", lambda: "active / running")
+    warm = sessions.collect_status(root, 1500)
+    assert warm["ready"] is False
+    assert warm["rows"][0][2:] == ("idle", "warm", sessions.datetime.fromtimestamp(2000).strftime("%m-%d %H:%M:%S"), "8m")
+    cold = sessions.collect_status(root, 2000)
+    assert cold["ready"] is True
+    assert cold["rows"][0][3] == "expired (est.)"
+    assert cold["rows"][0][-1] == "0s"
+    os.utime(transcript, (1900, 1900))
+    assert sessions.collect_status(root, 2000)["rows"][0][3] == "warm"

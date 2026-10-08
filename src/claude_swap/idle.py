@@ -14,13 +14,26 @@ import sys
 import time
 from pathlib import Path
 
-from claude_swap.paths import get_backup_root
+from claude_swap.paths import get_backup_root, get_claude_config_home, get_default_claude_config_home
 from claude_swap.locking import FileLock
 from claude_swap.exceptions import LockError
 from claude_swap.process_detection import scan_sessions, is_pid_alive
 from claude_swap.settings import atomic_write_json
 
 QUIET_FALLBACK_S = 3600
+
+
+def tracked_config_dirs(root: Path) -> list[Path]:
+    profiles = [get_claude_config_home(), get_default_claude_config_home()]
+    profiles.extend(p for p in (root / "sessions").glob("*") if p.is_dir())
+    return list(dict.fromkeys(profiles))
+
+
+def transcript_deadline(transcript: Path, record: dict | None) -> float:
+    mtime = transcript.stat().st_mtime
+    if record and record.get("known") is True and mtime <= record["transcript_mtime"]:
+        return record.get("expires_at") or 0
+    return mtime + QUIET_FALLBACK_S
 
 
 def record_status(data: dict, root: Path, now: float) -> None:
@@ -105,12 +118,8 @@ def idle_ready(config_dirs: list[Path], root: Path, now: float) -> tuple[bool, s
         for config in config_dirs:
             transcripts.update((config / "projects").rglob("*.jsonl"))
         for transcript in transcripts:
-            mtime = transcript.stat().st_mtime
             record = by_transcript.get(transcript)
-            if record and record.get("known") is True and mtime <= record["transcript_mtime"]:
-                expiry = record.get("expires_at") or 0
-            else:
-                expiry = mtime + QUIET_FALLBACK_S
+            expiry = transcript_deadline(transcript, record)
             if not isinstance(expiry, (int, float)) or not math.isfinite(expiry):
                 return False, "session-cache-unknown"
             if expiry > now:

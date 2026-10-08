@@ -1384,12 +1384,9 @@ class AutoSwitchEngine:
         return TickOutcome.BLOCKED
 
     def _idle_ready(self) -> tuple[bool, str]:
-        from claude_swap.idle import idle_ready
-        from claude_swap.paths import get_claude_config_home, get_default_claude_config_home
+        from claude_swap.idle import idle_ready, tracked_config_dirs
 
-        profiles = [get_claude_config_home(), get_default_claude_config_home()]
-        profiles.extend(p for p in (self.switcher.backup_dir / "sessions").glob("*") if p.is_dir())
-        return idle_ready(list(dict.fromkeys(profiles)), self.switcher.backup_dir, self.clock())
+        return idle_ready(tracked_config_dirs(self.switcher.backup_dir), self.switcher.backup_dir, self.clock())
 
     def _rebalance_idle(self, current: str, quarantined: set[str], state: dict) -> TickOutcome:
         """Prepare the next session without burning quota on a warm context."""

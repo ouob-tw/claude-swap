@@ -704,6 +704,58 @@ class TestRunAction:
 
 
 @pytest.mark.asyncio
+class TestSessionsScreen:
+    async def test_open_from_dashboard_shows_status_without_switching(self, tmp_path, monkeypatch):
+        from claude_swap.tui import sessions
+        from claude_swap.tui.dashboard import DashboardScreen
+        from textual.widgets import DataTable, Static
+
+        data = {"service": "active / running", "enabled": True, "ceiling": 90,
+                "ready": False, "reason": "A session is busy, waiting, or unknown",
+                "rows": [("example-id", "project", "busy", "warm", "10-08 18:00:00", "20m")],
+                "errors": 0, "last": "none recorded"}
+        monkeypatch.setattr(sessions, "collect_status", lambda root, now: data)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(110, 30)) as pilot:
+            await settle(pilot)
+            await pilot.press("c")
+            await settle(pilot)
+            assert isinstance(app.screen, sessions.SessionsScreen)
+            summary = str(app.screen.query_one("#sessions-summary", Static).render())
+            assert "active / running" in summary and "90%" in summary
+            assert "blocked" in summary and "busy" in summary
+            table = app.screen.query_one(DataTable)
+            assert table.get_row_at(0)[0] == "example-id"
+            assert app._store_only is True
+            assert not any(call[0] in ("switch", "switch_to") for call in fake.calls)
+            data["rows"] = []
+            app.screen._refresh_status()
+            await settle(pilot)
+            assert table.row_count == 0
+            await pilot.press("escape")
+            assert isinstance(app.screen, DashboardScreen)
+            assert app._store_only is False
+
+    async def test_monitor_error_is_visible_and_recoverable(self, tmp_path, monkeypatch):
+        from claude_swap.tui import sessions
+        from textual.widgets import Static
+
+        def fail(root, now):
+            raise OSError("private details")
+
+        monkeypatch.setattr(sessions, "collect_status", fail)
+        app = make_app(FakeSwitcher([make_account(1, active=True)], tmp_path))
+        async with app.run_test(size=(90, 25)) as pilot:
+            await settle(pilot)
+            await pilot.press("c")
+            await settle(pilot)
+            text = str(app.screen.query_one("#sessions-summary", Static).render())
+            assert "unavailable" in text and "private details" not in text
+            assert app.screen._refreshing is False
+
+
+@pytest.mark.asyncio
 class TestDashboard:
     async def test_panel_shows_active_full_and_others_mini(self, tmp_path):
         fake = FakeSwitcher(
@@ -802,14 +854,15 @@ class TestDashboard:
                 "switch",
                 "watch",
                 "auto",
+                "sessions",
                 "add-menu",
                 "disable-menu",
                 "remove-menu",
                 "theme-menu",
                 "quit",
             ]
-            # nest into Add (index 3), then back out with escape
-            await pilot.press("down", "down", "down", "enter")
+            # Nest into Add by action ID, then back out with escape.
+            await menu_select(pilot, "add-menu")
             await pilot.pause()
             ids = [item.action_id for item in menu.query(MenuItem)]
             assert ids == ["add-login", "add-token", "back"]
@@ -1709,4 +1762,3 @@ class TestThemeWiring:
             await menu_select(pilot, "theme:light")
             assert app._theme_name == "light"
             assert app.theme == "cswap-light"
-

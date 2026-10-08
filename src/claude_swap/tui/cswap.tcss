@@ -6,6 +6,21 @@ Screen {
     background: $background;
 }
 
+#sessions-title {
+    height: 1;
+    margin: 1 2;
+    color: $primary;
+    text-style: bold;
+}
+
+#sessions-summary {
+    height: auto;
+    margin: 0 2 1 2;
+}
+
+#sessions-table { height: 1fr; }
+#sessions-note { height: auto; margin: 1 2; color: $secondary; }
+
 /* -- accounts panel (the always-visible monitor) --------------------------- */
 
 #accounts-panel {
