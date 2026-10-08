@@ -1831,6 +1831,15 @@ class AutoSwitchEngine:
             if h is None:
                 continue
             any_known = True          # it EXISTS and is readable either way
+            if settings.target_five_hour_max_pct < 100.0:
+                row = usage.get(num)
+                window = row.get("five_hour") if isinstance(row, dict) else None
+                pct = window.get("pct") if isinstance(window, dict) else None
+                # No escape may spend the small remainder on reloading context.
+                # Keep stale pre-reset readings barred until usage confirms
+                # recovery; elapsed wall time alone does not grant quota.
+                if pct is None or pct > settings.target_five_hour_max_pct:
+                    continue
             if h <= 0:
                 continue  # itself at its limit — never a target
             if num == no_return:

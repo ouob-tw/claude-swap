@@ -44,6 +44,9 @@ class AutoSwitchSettings:
     """
 
     threshold: float = 90.0
+    # Hard landing ceiling, including at-limit/failover escapes. A fresh
+    # post-reset usage reading makes a spent account eligible again.
+    target_five_hour_max_pct: float = 100.0
     interval_seconds: float = 60.0
     cooldown_seconds: float = 300.0
     hysteresis_pct: float = 10.0
@@ -105,6 +108,10 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "autoswitch", "threshold", "threshold", "float", 50.0, 99.9,
             help="Switch when the binding 5h/7d window reaches this pct",
+        ),
+        SettingSpec(
+            "autoswitch", "targetFiveHourMaxPct", "target_five_hour_max_pct", "float", 0.0, 100.0,
+            help="Never auto-switch onto an account above this 5h usage pct; wait for reset",
         ),
         SettingSpec(
             "autoswitch", "intervalSeconds", "interval_seconds", "float", 15.0, 3600.0,

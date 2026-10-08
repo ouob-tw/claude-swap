@@ -194,6 +194,78 @@ def harness(temp_home: Path) -> EngineHarness:
     return h
 
 
+class TestFiveHourLandingCeiling:
+    @pytest.mark.parametrize("active_pct", [99, 100])
+    def test_tick_waits_then_switches_after_reset(self, temp_home, active_pct):
+        h = EngineHarness(temp_home, target_five_hour_max_pct=90, cooldown_seconds=0)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.make_live("a@example.com", 1)
+        now = h.clock()
+        usage = {"1": _usage(active_pct, _iso_at(now + 3600)),
+                 "2": _usage(91, _iso_at(now + 60))}
+        assert h.tick_with_usage(usage) is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+        h.clock.advance(120)
+        h.engine = h._make_engine()
+        assert h.tick_with_usage(usage) is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+        usage["2"] = _usage(0, _iso_at(h.clock() + 18000))
+        assert h.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    @pytest.mark.parametrize("trigger", ["proactive", "consume-first", "at-limit", "failover"])
+    @pytest.mark.parametrize("strategy", ["best", "consume-first"])
+    def test_spent_peer_is_barred_until_usage_confirms_reset(self, harness, trigger, strategy):
+        engine = harness.engine
+        settings = replace(harness.settings, target_five_hour_max_pct=90, strategy=strategy)
+        now = harness.clock()
+        # The peer recovers sooner and has more headroom: the old all-spent
+        # exception would select it despite having only 9% left.
+        usage = {
+            "1": _usage(99, _iso_at(now + 3600)),
+            "2": _usage(91, _iso_at(now + 60)),
+        }
+        usage["1"]["seven_day"]["resets_at"] = _iso_at(now + 7200)
+        usage["2"]["seven_day"]["resets_at"] = _iso_at(now + 1800)
+
+        def rank():
+            return engine._rank_candidates(
+                trigger=trigger, consume_first=strategy == "consume-first",
+                oauth_candidates=["2"], no_return=None, usage=usage,
+                headroom={"1": 1, "2": 100 - usage["2"]["five_hour"]["pct"]},
+                current="1", active_headroom=1, settings=settings, now=harness.clock(),
+            )[0]
+
+        assert rank() == []
+        harness.clock.advance(120)
+        engine = harness._make_engine()  # restart does not bypass the ceiling
+        assert rank() == []  # old reading still says 91%, even after reset time
+        usage["2"]["five_hour"] = {"pct": 0, "resets_at": _iso_at(now + 18000)}
+        assert rank() == ["2"]
+
+    @pytest.mark.parametrize("pct, expected", [(89.9, ["2"]), (90, ["2"]), (90.01, [])])
+    def test_exact_boundary(self, harness, pct, expected):
+        ordered, _, _ = harness.engine._rank_candidates(
+            trigger="at-limit", consume_first=False, oauth_candidates=["2"],
+            no_return=None, usage={"1": _usage(100), "2": _usage(pct)},
+            headroom={"1": 0, "2": 100 - pct}, current="1", active_headroom=0,
+            settings=replace(harness.settings, target_five_hour_max_pct=90),
+            now=harness.clock(),
+        )
+        assert ordered == expected
+
+    def test_unknown_five_hour_usage_cannot_bypass_ceiling(self, harness):
+        ordered, _, _ = harness.engine._rank_candidates(
+            trigger="failover", consume_first=False, oauth_candidates=["2"],
+            no_return=None, usage={"2": {"seven_day": {"pct": 10}}},
+            headroom={"2": 90}, current="1", active_headroom=None,
+            settings=replace(harness.settings, target_five_hour_max_pct=90),
+            now=harness.clock(),
+        )
+        assert ordered == []
+
+
 class TestEngineHarnessIsolation:
     """Pins the guarantee `EngineHarness.__init__`'s per-instance isolation
     exists for (see its docstring): two harnesses built against the SAME
@@ -6893,4 +6965,3 @@ class TestFreshenRoutesThroughGate:
         assert verdict == "ok"
         assert gate_calls["args"][0] == "2"
         assert "called" not in direct, "freshen must not POST outside the gate"
-

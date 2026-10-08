@@ -114,6 +114,14 @@ For cron/systemd timers, `--once` reports the outcome in its exit code (`0` swit
 
 Defaults like the threshold and cooldown are configurable with `cswap config set autoswitch.threshold 80` — flags override them (see [Configuration](#configuration)).
 
+To avoid spending the last 10% of a five-hour window on reloading context,
+run `cswap config set autoswitch.targetFiveHourMaxPct 90`. Auto-switch then
+refuses any OAuth target above 90% five-hour usage, including at-limit and
+failover moves. If none qualifies, it stays put and keeps polling. A reported
+post-reset usage reading makes the account eligible again; a reset timestamp
+alone cannot bypass the ceiling. The default is 100 (no additional ceiling).
+Manual switches remain available.
+
 </details>
 
 ### Run multiple accounts at the same time (session mode)

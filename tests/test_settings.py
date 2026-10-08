@@ -40,6 +40,10 @@ def _args(**kwargs) -> argparse.Namespace:
 
 
 class TestLoadSettings:
+    def test_five_hour_landing_ceiling_is_persisted(self, tmp_path):
+        set_setting(tmp_path, "autoswitch.targetFiveHourMaxPct", "90")
+        assert load_settings(tmp_path).target_five_hour_max_pct == 90
+
     def test_missing_file_gives_defaults(self, tmp_path: Path):
         assert load_settings(tmp_path) == AutoSwitchSettings()
 
