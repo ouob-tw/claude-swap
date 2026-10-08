@@ -30,6 +30,11 @@ Screen {
 
 #sessions-table { height: 1fr; }
 
+#sessions-help:light {
+    background: $surface;
+    color: $foreground;
+}
+
 #sessions-help:light:hover, #sessions-help:light:focus,
 SessionInfoModal:light .modal-buttons Button:hover,
 SessionInfoModal:light .modal-buttons Button:focus {
