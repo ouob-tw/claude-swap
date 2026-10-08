@@ -31,6 +31,8 @@ def tracked_config_dirs(root: Path) -> list[Path]:
 
 
 def transcript_deadline(transcript: Path, record: dict | None) -> float:
+    if not transcript.is_file():
+        raise ValueError("transcript is not a file")
     mtime = transcript.stat().st_mtime
     if record and record.get("known") is True and mtime <= record["transcript_mtime"]:
         expiry = record["expires_at"]

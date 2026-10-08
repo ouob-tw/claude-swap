@@ -46,6 +46,22 @@ def test_missing_cache_observation_blocks_even_after_hours(observation):
     assert idle_ready([config], root, 9000) == (False, "session-cache-unknown")
 
 
+def test_directory_transcript_cannot_qualify_as_expired(observation, monkeypatch):
+    from claude_swap.tui import sessions
+    config, root, transcript, _ = observation
+    monkeypatch.setattr(sessions, "tracked_config_dirs", lambda root: [config])
+    monkeypatch.setattr(sessions, "service_status", lambda: "unavailable")
+    path = next((root / "prompt-cache").glob("*.json"))
+    row = json.loads(path.read_text())
+    row["transcript_path"] = str(transcript.parent)
+    path.write_text(json.dumps(row))
+    os.utime(transcript.parent, (1000, 1000))
+    report = sessions.collect_status(root, 9000)
+    assert report["rows"][0][3] == "unknown"
+    assert not report["ready"]
+    assert idle_ready([config], root, 9000) == (False, "session-state-unknown")
+
+
 def test_later_activity_restarts_conservative_wait(observation):
     config, root, transcript, _ = observation
     os.utime(transcript, (1900, 1900))

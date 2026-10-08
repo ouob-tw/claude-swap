@@ -189,6 +189,8 @@ Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `cswap
 
 Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. `cswap watch` opens it straight to the live monitor. Works on macOS, Linux, and Windows.
 
+Press `c` on the main menu to open **Session / cache status**. This read-only page refreshes every five seconds and shows the auto-switch service, session activity, estimated cache expiry, and the reason idle preparation is blocked. Unreadable or stale data is marked unknown or unavailable. Press Escape to return.
+
 <img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
 ### Refresh expired tokens
