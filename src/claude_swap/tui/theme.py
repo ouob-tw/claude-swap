@@ -101,17 +101,17 @@ CSWAP_DARK = Theme(
     },
 )
 
-# Light companion palette (same intent, tuned for a warm near-white base).
+# Light companion palette: neutral near-white surfaces for E-ink displays.
 ACCENT_LIGHT = "#954c2a"  # burnt sienna — deepened for AA on panel (worst-case row bg)
-FOREGROUND_LIGHT = "#2b2723"
-MUTED_LIGHT = "#635d55"
-BACKGROUND_LIGHT = "#faf7f2"
-SURFACE_LIGHT = "#efeae1"
-PANEL_LIGHT = "#e2dbcf"  # most-elevated = darkest (inverted from dark)
+FOREGROUND_LIGHT = "#111111"
+MUTED_LIGHT = "#444444"
+BACKGROUND_LIGHT = "#ffffff"
+SURFACE_LIGHT = "#f7f7f7"
+PANEL_LIGHT = "#e8e8e8"  # most-elevated = darkest (inverted from dark)
 SEV_OK_LIGHT = "#3d6b3d"  # forest green — deepened for AA on panel
 SEV_WARN_LIGHT = "#795911"  # deep ochre — deepened for AA on panel
 SEV_CRIT_LIGHT = "#ad3128"  # brick red — deepened for AA on panel
-TRACK_LIGHT = "#cec7ba"
+TRACK_LIGHT = "#cccccc"
 
 CSWAP_LIGHT = Theme(
     name="cswap-light",
@@ -131,6 +131,9 @@ CSWAP_LIGHT = Theme(
         "block-cursor-background": PANEL_LIGHT,
         "block-cursor-foreground": FOREGROUND_LIGHT,
         "block-cursor-text-style": "none",
+        "block-cursor-blurred-background": PANEL_LIGHT,
+        "block-cursor-blurred-foreground": FOREGROUND_LIGHT,
+        "block-hover-background": PANEL_LIGHT,
         "track": TRACK_LIGHT,
     },
 )

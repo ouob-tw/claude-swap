@@ -30,6 +30,13 @@ Screen {
 
 #sessions-table { height: 1fr; }
 
+#sessions-help:light:hover, #sessions-help:light:focus,
+SessionInfoModal:light .modal-buttons Button:hover,
+SessionInfoModal:light .modal-buttons Button:focus {
+    background: $panel;
+    color: $foreground;
+}
+
 /* -- accounts panel (the always-visible monitor) --------------------------- */
 
 #accounts-panel {
