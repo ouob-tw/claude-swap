@@ -295,6 +295,73 @@ class TestIdleRebalance:
             assert next(e for e in harness.events if isinstance(e, SwitchEvent)).dry_run is True
 
 
+class TestWeeklyResetStrategy:
+    """Replay quota selection with fake measurements and isolated account files."""
+
+    def test_busy_manual_account_below_threshold_is_kept(self, temp_home):
+        h = EngineHarness(temp_home, strategy="weekly-reset", threshold=94,
+                          target_five_hour_max_pct=94, idle_rebalance=True, cooldown_seconds=0)
+        for number in (1, 2, 3):
+            h.seed(number, f"account{number}@example.com")
+        h.make_live("account3@example.com", 3)
+        sequence = h.switcher._get_sequence_data()
+        sequence["activeAccountNumber"] = 3
+        h.switcher._write_json(h.switcher.sequence_file, sequence)
+        usage = {
+            "1": _usage(98),
+            "2": {"five_hour": {"pct": 0}, "seven_day": {"pct": 14, "resets_at": _iso_at(h.clock() + 3600)}},
+            "3": {"five_hour": {"pct": 0}, "seven_day": {"pct": 85, "resets_at": _iso_at(h.clock() + 7200)}},
+        }
+        with patch.object(h.engine, "_idle_ready", return_value=(False, "busy")):
+            assert h.tick_with_usage(usage) is TickOutcome.NO_ACTION
+            assert h.active_number() == 3
+            assert not any(isinstance(e, SwitchEvent) for e in h.events)
+
+    @pytest.mark.parametrize("active_pct", [98, 100, None])
+    def test_incident_prefers_nearer_reset_despite_less_weekly_remaining(self, temp_home, active_pct):
+        h = EngineHarness(temp_home, strategy="weekly-reset", threshold=94,
+                          target_five_hour_max_pct=94, cooldown_seconds=0, unhealthy_ticks=1)
+        for number in (1, 2, 3):
+            h.seed(number, f"account{number}@example.com")
+        h.make_live("account1@example.com", 1)
+        usage = {
+            "1": _usage(active_pct) if active_pct is not None else None,
+            "2": {"five_hour": {"pct": 0}, "seven_day": {"pct": 14, "resets_at": _iso_at(h.clock() + 6 * 86400)}},
+            "3": {"five_hour": {"pct": 0}, "seven_day": {"pct": 85, "resets_at": _iso_at(h.clock() + 13 * 3600)}},
+        }
+        assert h.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+        h.clock.advance(600)
+        assert h.tick_with_usage(usage) is TickOutcome.NO_ACTION
+        assert h.active_number() == 3
+
+    @pytest.mark.parametrize("peer_five, peer_weekly, peer_reset, expected", [
+        (90, 14, 3600, ["3", "2"]),  # Weekly remaining breaks reset ties, not 5h headroom.
+        (0, 85, 3600, ["2", "3"]),
+        (94, 14, 1800, ["2"]),
+        (0, 14, None, ["2"]),
+    ])
+    def test_ordering_and_eligibility(self, harness, peer_five, peer_weekly, peer_reset, expected):
+        now = harness.clock()
+        week = {"pct": peer_weekly}
+        if peer_reset is not None:
+            week["resets_at"] = _iso_at(now + peer_reset)
+        usage = {
+            "1": _usage(100),
+            "2": {"five_hour": {"pct": 0}, "seven_day": {"pct": 40, "resets_at": _iso_at(now + 3600)}},
+            "3": {"five_hour": {"pct": peer_five}, "seven_day": week},
+        }
+        ordered, _, _ = harness.engine._rank_candidates(
+            trigger="at-limit", consume_first=False, oauth_candidates=["2", "3"],
+            no_return=None, usage=usage,
+            headroom={n: oauth.account_headroom(row) for n, row in usage.items()},
+            current="1", active_headroom=0,
+            settings=replace(harness.settings, strategy="weekly-reset", threshold=94, target_five_hour_max_pct=94),
+            now=now,
+        )
+        assert ordered == expected
+
+
 class TestFiveHourLandingCeiling:
     def test_live_incident_keeps_account_three_when_peers_are_at_ceiling(self, temp_home):
         h = EngineHarness(temp_home, target_five_hour_max_pct=90, cooldown_seconds=0)

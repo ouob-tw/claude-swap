@@ -1837,6 +1837,7 @@ class AutoSwitchEngine:
         twice per tick: on the stored snapshot to decide provisionally, then
         on the escalated refetch to re-verify before switching.
         """
+        weekly_reset = settings.strategy == "weekly-reset"
         # consume-first ranks by soonest weekly reset; a proactive (below-
         # threshold) target must reset strictly sooner than where we are.
         active_reset_ts = (
@@ -1856,7 +1857,7 @@ class AutoSwitchEngine:
         # percentage-point margin so two accounts in the 90s cannot ping-pong.
         all_above = _every_account_above_threshold(
             oauth_candidates, headroom, active_headroom, settings.threshold
-        )
+        ) and not weekly_reset
         # "Is anything worth having?" — the most headroom any candidate with a
         # READABLE row offers. Two exclusions and no others:
         #
@@ -1909,8 +1910,16 @@ class AutoSwitchEngine:
             if num == no_return:
                 continue  # the account we just left; see _no_return_account
             reset_ts = (
-                _seven_day_reset_ts(usage.get(num), now) if consume_first else None
+                _seven_day_reset_ts(usage.get(num), now) if consume_first or weekly_reset else None
             )
+            if weekly_reset:
+                row = usage.get(num)
+                window = row.get("seven_day") if isinstance(row, dict) else None
+                weekly = window.get("pct") if isinstance(window, dict) else None
+                if (reset_ts is None or isinstance(weekly, bool)
+                        or not isinstance(weekly, (int, float))
+                        or not math.isfinite(weekly) or not 0 <= weekly <= 100):
+                    continue
             recovery_ts = (
                 _binding_recovery_ts(usage.get(num), self._models, now)
                 if all_above
@@ -1969,7 +1978,7 @@ class AutoSwitchEngine:
                             ):
                                 fallback.append(((0, recovery_ts, -h), num))
                             continue
-                elif consume_first:
+                elif consume_first or weekly_reset:
                     # Purely proactive on reset ordering: below the threshold,
                     # only move to accounts whose weekly window resets sooner
                     # than the active one (above the threshold we must move, so
@@ -2011,6 +2020,10 @@ class AutoSwitchEngine:
                 key: tuple = (
                     (0, recovery_ts, -h) if by_recovery else (1, -h, recovery_ts)
                 )
+            elif weekly_reset:
+                # Threshold-triggered selection shares idle preparation's
+                # weekly ordering, without moving a healthy busy session.
+                key = (reset_ts, weekly)
             elif consume_first:
                 # Soonest weekly reset first (unknown resets sort last), most
                 # headroom breaks ties, then sequence order.

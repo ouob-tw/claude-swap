@@ -113,6 +113,10 @@ class TestLoadSettings:
         set_setting(tmp_path, "autoswitch.strategy", "consume-first")
         assert load_settings(tmp_path).strategy == "consume-first"
 
+    def test_set_strategy_weekly_reset(self, tmp_path: Path):
+        set_setting(tmp_path, "autoswitch.strategy", "weekly-reset")
+        assert load_settings(tmp_path).strategy == "weekly-reset"
+
 
 class TestSaveSettings:
     def test_roundtrip(self, tmp_path: Path):
