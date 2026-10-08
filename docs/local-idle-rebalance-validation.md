@@ -11,7 +11,7 @@ status-line `prompt_cache.expires_at`; this is a client prediction.
 
 Fresh quota measurements rank enabled OAuth accounts by earliest weekly reset,
 then lowest weekly usage (most remaining quota). Equal rankings keep the active
-account. Five-hour usage above 90% remains excluded on this host. Idle state is
+account. Five-hour usage at or above 90% remains excluded on this host. Idle state is
 rechecked before activation; cooldown is retained. Existing quota/failover
 switches continue independently. Idle preparation has no nightly time window.
 

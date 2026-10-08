@@ -227,10 +227,11 @@ class TestIdleRebalance:
             assert harness.tick_with_usage(self.usage(harness)) is TickOutcome.NO_ACTION
             assert harness.active_number() == 1
 
-    def test_ceiling_excludes_best_weekly_candidate(self, harness):
+    @pytest.mark.parametrize("pct", [90, 91])
+    def test_ceiling_excludes_best_weekly_candidate(self, harness, pct):
         self.enable(harness)
         usage = self.usage(harness)
-        usage["3"]["five_hour"]["pct"] = 91
+        usage["3"]["five_hour"]["pct"] = pct
         with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")), \
              patch.object(harness.engine, "_freshen_target", return_value="ok"):
             assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
@@ -295,6 +296,28 @@ class TestIdleRebalance:
 
 
 class TestFiveHourLandingCeiling:
+    def test_live_incident_keeps_account_three_when_peers_are_at_ceiling(self, temp_home):
+        h = EngineHarness(temp_home, target_five_hour_max_pct=90, cooldown_seconds=0)
+        for number in (1, 2, 3):
+            h.seed(number, f"account{number}@example.com")
+        h.make_live("account3@example.com", 3)
+        sequence = h.switcher._get_sequence_data()
+        sequence["activeAccountNumber"] = 3
+        h.switcher._write_json(h.switcher.sequence_file, sequence)
+        usage = {
+            "1": {"five_hour": {"pct": 93}, "seven_day": {"pct": 26}},
+            "2": {"five_hour": {"pct": 90}, "seven_day": {"pct": 12}},
+            "3": {"five_hour": {"pct": 100}, "seven_day": {"pct": 85}},
+        }
+        for _ in range(2):
+            assert h.tick_with_usage(usage) is TickOutcome.BLOCKED
+            assert h.active_number() == 3
+            assert not any(isinstance(e, SwitchEvent) for e in h.events)
+            h.clock.advance(600)
+        usage["2"]["five_hour"]["pct"] = 0
+        assert h.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
     @pytest.mark.parametrize("active_pct", [99, 100])
     def test_tick_waits_then_switches_after_reset(self, temp_home, active_pct):
         h = EngineHarness(temp_home, target_five_hour_max_pct=90, cooldown_seconds=0)
@@ -344,13 +367,18 @@ class TestFiveHourLandingCeiling:
         usage["2"]["five_hour"] = {"pct": 0, "resets_at": _iso_at(now + 18000)}
         assert rank() == ["2"]
 
-    @pytest.mark.parametrize("pct, expected", [(89.9, ["2"]), (90, ["2"]), (90.01, [])])
-    def test_exact_boundary(self, harness, pct, expected):
+    @pytest.mark.parametrize("pct, expected", [(89.9, ["2"]), (90, []), (90.01, [])])
+    @pytest.mark.parametrize("trigger", ["proactive", "at-limit", "failover", "consume-first"])
+    @pytest.mark.parametrize("strategy", ["best", "consume-first"])
+    def test_exact_boundary(self, harness, pct, expected, trigger, strategy):
+        usage = {"1": _usage(100), "2": _usage(pct)}
+        usage["1"]["seven_day"]["resets_at"] = _iso_at(harness.clock() + 7200)
+        usage["2"]["seven_day"]["resets_at"] = _iso_at(harness.clock() + 3600)
         ordered, _, _ = harness.engine._rank_candidates(
-            trigger="at-limit", consume_first=False, oauth_candidates=["2"],
-            no_return=None, usage={"1": _usage(100), "2": _usage(pct)},
+            trigger=trigger, consume_first=strategy == "consume-first", oauth_candidates=["2"],
+            no_return=None, usage=usage,
             headroom={"1": 0, "2": 100 - pct}, current="1", active_headroom=0,
-            settings=replace(harness.settings, target_five_hour_max_pct=90),
+            settings=replace(harness.settings, target_five_hour_max_pct=90, strategy=strategy),
             now=harness.clock(),
         )
         assert ordered == expected

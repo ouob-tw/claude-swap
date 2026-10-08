@@ -44,7 +44,7 @@ class AutoSwitchSettings:
     """
 
     threshold: float = 90.0
-    # Hard landing ceiling, including at-limit/failover escapes. A fresh
+    # Exclusive landing ceiling, including at-limit/failover escapes. A fresh
     # post-reset usage reading makes a spent account eligible again.
     target_five_hour_max_pct: float = 100.0
     idle_rebalance: bool = False
@@ -112,7 +112,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "targetFiveHourMaxPct", "target_five_hour_max_pct", "float", 0.0, 100.0,
-            help="Never auto-switch onto an account above this 5h usage pct; wait for reset",
+            help="Never auto-switch onto an account at or above this 5h usage pct; wait for reset",
         ),
         SettingSpec(
             "autoswitch", "idleRebalance", "idle_rebalance", "bool",

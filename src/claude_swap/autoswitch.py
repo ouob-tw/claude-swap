@@ -1418,7 +1418,7 @@ class AutoSwitchEngine:
                 return TickOutcome.NO_ACTION
             h = oauth.account_headroom(row, self._models)
             reset = _seven_day_reset_ts(row, now)
-            if h is None or h <= 0 or five > self.settings.target_five_hour_max_pct:
+            if h is None or h <= 0 or five >= self.settings.target_five_hour_max_pct:
                 continue
             if reset is None:
                 self._emit(NoSwitchEvent(reason="idle-reset-unknown"))
@@ -1902,7 +1902,7 @@ class AutoSwitchEngine:
                 # No escape may spend the small remainder on reloading context.
                 # Keep stale pre-reset readings barred until usage confirms
                 # recovery; elapsed wall time alone does not grant quota.
-                if pct is None or pct > settings.target_five_hour_max_pct:
+                if pct is None or pct >= settings.target_five_hour_max_pct:
                     continue
             if h <= 0:
                 continue  # itself at its limit — never a target
