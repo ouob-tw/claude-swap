@@ -117,6 +117,15 @@ class TestLoadSettings:
         set_setting(tmp_path, "autoswitch.strategy", "weekly-reset")
         assert load_settings(tmp_path).strategy == "weekly-reset"
 
+    def test_separate_weekly_threshold_persists_and_can_be_unset(self, tmp_path: Path):
+        assert load_settings(tmp_path).seven_day_threshold is None
+        set_setting(tmp_path, "autoswitch.threshold", "94")
+        set_setting(tmp_path, "autoswitch.sevenDayThreshold", "99")
+        settings = load_settings(tmp_path)
+        assert settings.threshold == 94 and settings.seven_day_threshold == 99
+        assert unset_setting(tmp_path, "autoswitch.sevenDayThreshold")
+        assert load_settings(tmp_path).seven_day_threshold is None
+
 
 class TestSaveSettings:
     def test_roundtrip(self, tmp_path: Path):

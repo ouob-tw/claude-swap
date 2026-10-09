@@ -614,6 +614,28 @@ def _every_account_above_threshold(
     return all((100.0 - h) >= threshold for h in measured)
 
 
+def _below_switch_threshold(headroom, usage, models, settings, margin=0.0) -> bool:
+    if headroom is None:
+        return False
+    if settings.seven_day_threshold is None:
+        return 100.0 - headroom < settings.threshold - margin
+    windows = oauth.relevant_windows(usage, models)
+    return bool(windows) and all(
+        pct < (settings.threshold if name == "5h" else settings.seven_day_threshold) - margin
+        for name, pct, _ in windows
+    )
+
+
+def _threshold_detail(headroom, usage, models, settings) -> str:
+    if settings.seven_day_threshold is None:
+        return f"{pct_label(100.0 - headroom)}% < {pct_label(settings.threshold)}%"
+    return "; ".join(
+        f"{name} {pct_label(pct)}% < "
+        f"{pct_label(settings.threshold if name == '5h' else settings.seven_day_threshold)}%"
+        for name, pct, _ in oauth.relevant_windows(usage, models)
+    )
+
+
 def _ref(number: str, email: str) -> dict:
     return {"number": int(number), "email": email}
 
@@ -978,18 +1000,14 @@ class AutoSwitchEngine:
         if active_headroom is not None:
             self._unhealthy_ticks = 0
             self._idle_hold_since = None
-            utilization = 100.0 - active_headroom
-            if utilization < settings.threshold:
+            if _below_switch_threshold(active_headroom, usage.get(current), self._models, settings):
                 if settings.strategy != "consume-first":
                     self._emit(
                         NoSwitchEvent(
                             reason="below-threshold",
                             # Both sides through pct_label: .0f utilization could
                             # display an impossible "100% < 99.9%".
-                            detail=(
-                                f"{pct_label(utilization)}% < "
-                                f"{pct_label(settings.threshold)}%"
-                            ),
+                            detail=_threshold_detail(active_headroom, usage.get(current), self._models, settings),
                         )
                     )
                     return TickOutcome.NO_ACTION
@@ -1086,10 +1104,7 @@ class AutoSwitchEngine:
             self._emit(
                 NoSwitchEvent(
                     reason="below-threshold",
-                    detail=(
-                        f"{pct_label(100.0 - active_headroom)}% < "
-                        f"{pct_label(settings.threshold)}%"
-                    ),
+                    detail=_threshold_detail(active_headroom, usage.get(current), self._models, settings),
                 )
             )
             return TickOutcome.NO_ACTION
@@ -1167,6 +1182,7 @@ class AutoSwitchEngine:
                 recovered,
                 kw["settings"],
                 kw["current"],
+                usage=kw["usage"],
             )
             ranked = self._rank_candidates(no_return=no_return, **kw)
             if no_return is not None and not ranked[0] and recovered:
@@ -1420,6 +1436,8 @@ class AutoSwitchEngine:
             reset = _seven_day_reset_ts(row, now)
             if h is None or h <= 0 or five >= self.settings.target_five_hour_max_pct:
                 continue
+            if self.settings.seven_day_threshold is not None and weekly >= self.settings.seven_day_threshold:
+                continue
             if reset is None:
                 self._emit(NoSwitchEvent(reason="idle-reset-unknown"))
                 return TickOutcome.NO_ACTION
@@ -1454,6 +1472,7 @@ class AutoSwitchEngine:
         recovered: bool,
         settings: AutoSwitchSettings,
         current: str | None = None,
+        usage: dict | None = None,
     ) -> str | None:
         """The account this engine most recently left, while it is still barred.
 
@@ -1557,7 +1576,8 @@ class AutoSwitchEngine:
                     return None               # beats us outright; not a flip
             elif (
                 settings is not None
-                and left_headroom > 100.0 - settings.threshold
+                and (_below_switch_threshold(left_headroom, usage.get(barred), self._models, settings)
+                     if usage is not None else left_headroom > 100.0 - settings.threshold)
             ):
                 # An unreadable active must not be silently scored as "the
                 # peer does not beat it" -- same landing-eligible fallback
@@ -1733,7 +1753,7 @@ class AutoSwitchEngine:
             # when a nearer window starts binding, never as a side effect
             # of the active spending down -- the failure mode a bare
             # dominance leg has, guarded directly in the mutation table.
-            if h is not None and h > 100.0 - settings.threshold:
+            if _below_switch_threshold(h, usage.get(barred), self._models, settings):
                 return True
             peer_recovery_ts = _binding_recovery_ts(usage.get(barred), self._models, now)
             active_recovery_ts = _binding_recovery_ts(usage.get(current), self._models, now)
@@ -1799,7 +1819,7 @@ class AutoSwitchEngine:
             if active_headroom is not None:
                 if h > active_headroom * HORIZON_HEADROOM_RATIO + SPENT_HEADROOM_PCT:
                     return True
-            elif h > 100.0 - settings.threshold:
+            elif _below_switch_threshold(h, usage.get(barred), self._models, settings):
                 return True
         if (
             isinstance(left_headroom, (int, float))
@@ -1858,6 +1878,12 @@ class AutoSwitchEngine:
         all_above = _every_account_above_threshold(
             oauth_candidates, headroom, active_headroom, settings.threshold
         ) and not weekly_reset
+        if settings.seven_day_threshold is not None and not weekly_reset:
+            measured = [n for n in oauth_candidates if headroom.get(n) is not None]
+            all_above = bool(measured) and active_headroom is not None and not _below_switch_threshold(
+                active_headroom, usage.get(current), self._models, settings
+            ) and all(not _below_switch_threshold(headroom[n], usage.get(n), self._models, settings)
+                      for n in measured)
         # "Is anything worth having?" — the most headroom any candidate with a
         # READABLE row offers. Two exclusions and no others:
         #
@@ -1905,6 +1931,13 @@ class AutoSwitchEngine:
                 # recovery; elapsed wall time alone does not grant quota.
                 if pct is None or pct >= settings.target_five_hour_max_pct:
                     continue
+            if settings.seven_day_threshold is not None:
+                row = usage.get(num)
+                window = row.get("seven_day") if isinstance(row, dict) else None
+                weekly = window.get("pct") if isinstance(window, dict) else None
+                if (isinstance(weekly, bool) or not isinstance(weekly, (int, float))
+                        or not math.isfinite(weekly) or not 0 <= weekly < settings.seven_day_threshold):
+                    continue
             if h <= 0:
                 continue  # itself at its limit — never a target
             if num == no_return:
@@ -1930,7 +1963,7 @@ class AutoSwitchEngine:
                 # would re-trigger on the very next tick. At-limit and failover
                 # are escapes that skip this whole block — any account with real
                 # headroom beats a blocked or dead one.
-                if (100.0 - h) >= settings.threshold and not all_above:
+                if not _below_switch_threshold(h, usage.get(num), self._models, settings) and not all_above:
                     continue
                 if all_above:
                     # Checked before the strategies, because with nothing below
@@ -2149,7 +2182,10 @@ class AutoSwitchEngine:
             (active_headroom is None and active_value != USAGE_TOKEN_EXPIRED)
             or (
                 active_headroom is not None
-                and 100.0 - active_headroom >= threshold - ESCALATION_MARGIN_PCT
+                and not _below_switch_threshold(
+                    active_headroom, active_value, self._models,
+                    replace(self.settings, threshold=threshold), margin=ESCALATION_MARGIN_PCT,
+                )
             )
         )
         if escalate:

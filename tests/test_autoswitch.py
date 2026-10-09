@@ -298,6 +298,39 @@ class TestIdleRebalance:
 class TestWeeklyResetStrategy:
     """Replay quota selection with fake measurements and isolated account files."""
 
+    @pytest.mark.parametrize("five, week, expected", [
+        (20, 94, TickOutcome.NO_ACTION), (20, 98, TickOutcome.NO_ACTION),
+        (20, 98.99, TickOutcome.NO_ACTION), (20, 99, TickOutcome.SWITCHED),
+        (20, 100, TickOutcome.SWITCHED), (93.99, 98, TickOutcome.NO_ACTION),
+        (94, 98, TickOutcome.SWITCHED),
+    ])
+    def test_separate_five_hour_and_weekly_thresholds(self, temp_home, five, week, expected):
+        h = EngineHarness(temp_home, strategy="weekly-reset", threshold=94,
+                          seven_day_threshold=99, target_five_hour_max_pct=94, cooldown_seconds=0)
+        h.seed(1, "a@example.com"); h.seed(2, "b@example.com")
+        h.make_live("a@example.com", 1)
+        usage = {
+            "1": {"five_hour": {"pct": five}, "seven_day": {"pct": week}},
+            "2": {"five_hour": {"pct": 0}, "seven_day": {"pct": 14, "resets_at": _iso_at(h.clock() + 3600)}},
+        }
+        assert h.tick_with_usage(usage) is expected
+        assert h.active_number() == (2 if expected is TickOutcome.SWITCHED else 1)
+
+    @pytest.mark.parametrize("week, expected", [(98, ["2"]), (99, [])])
+    @pytest.mark.parametrize("trigger", ["proactive", "at-limit", "failover"])
+    def test_weekly_candidate_uses_weekly_threshold(self, harness, week, expected, trigger):
+        usage = {
+            "1": _usage(94),
+            "2": {"five_hour": {"pct": 10}, "seven_day": {"pct": week, "resets_at": _iso_at(harness.clock() + 3600)}},
+        }
+        ordered, _, _ = harness.engine._rank_candidates(
+            trigger=trigger, consume_first=False, oauth_candidates=["2"], no_return=None,
+            usage=usage, headroom={"1": 6, "2": 100 - week}, current="1", active_headroom=6,
+            settings=replace(harness.settings, strategy="weekly-reset", threshold=94,
+                             seven_day_threshold=99, target_five_hour_max_pct=94), now=harness.clock(),
+        )
+        assert ordered == expected
+
     def test_busy_manual_account_below_threshold_is_kept(self, temp_home):
         h = EngineHarness(temp_home, strategy="weekly-reset", threshold=94,
                           target_five_hour_max_pct=94, idle_rebalance=True, cooldown_seconds=0)

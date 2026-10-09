@@ -116,6 +116,8 @@ For cron/systemd timers, `--once` reports the outcome in its exit code (`0` swit
 
 Defaults like the threshold and cooldown are configurable with `cswap config set autoswitch.threshold 80` — flags override them (see [Configuration](#configuration)).
 
+To use separate window thresholds, set `autoswitch.threshold 94` and `autoswitch.sevenDayThreshold 99`. The 5h window then triggers at 94% and weekly windows at 99%; targets already at the weekly threshold are excluded. Unset `autoswitch.sevenDayThreshold` to restore the shared threshold.
+
 To avoid spending the last 10% of a five-hour window on reloading context,
 run `cswap config set autoswitch.targetFiveHourMaxPct 90`. Auto-switch then
 refuses any OAuth target at or above 90% five-hour usage, including at-limit and
