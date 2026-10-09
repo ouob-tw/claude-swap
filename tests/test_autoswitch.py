@@ -244,6 +244,18 @@ class TestIdleRebalance:
             assert harness.tick_with_usage(self.usage(harness)) is TickOutcome.NO_ACTION
             assert harness.active_number() == 1
 
+    @pytest.mark.parametrize("weekly, expected", [(98, 3), (99, 1)])
+    def test_idle_respects_weekly_candidate_threshold(self, harness, weekly, expected):
+        self.enable(harness)
+        harness.engine.settings = replace(harness.engine.settings, seven_day_threshold=99)
+        usage = self.usage(harness)
+        usage["2"]["seven_day"]["resets_at"] = _iso_at(harness.clock() + 7200)
+        usage["3"]["seven_day"]["pct"] = weekly
+        with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")), \
+             patch.object(harness.engine, "_freshen_target", return_value="ok"):
+            harness.tick_with_usage(usage)
+            assert harness.active_number() == expected
+
     def test_new_request_at_commit_recheck_cancels_rebalance(self, harness):
         self.enable(harness)
         with patch.object(harness.engine, "_idle_ready", side_effect=[(True, "cold"), (True, "cold"), (False, "busy")]), \

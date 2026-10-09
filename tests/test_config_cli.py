@@ -41,6 +41,7 @@ class TestConfigList:
         assert code == 0
         for key in (
             "autoswitch.threshold",
+            "autoswitch.sevenDayThreshold",
             "autoswitch.targetFiveHourMaxPct",
             "autoswitch.idleRebalance",
             "autoswitch.intervalSeconds",
@@ -53,7 +54,7 @@ class TestConfigList:
             "ui.theme",
         ):
             assert key in out
-        assert out.count("(default)") == 11
+        assert out.count("(default)") == 12
 
     def test_set_key_not_marked_default(self, temp_home, capsys):
         _run(["set", "autoswitch.cooldownSeconds", "600"], capsys)
@@ -80,7 +81,8 @@ class TestConfigList:
         assert payload["schemaVersion"] == 1
         assert payload["path"].endswith("settings.json")
         by_key = {entry["key"]: entry for entry in payload["settings"]}
-        assert len(by_key) == 11
+        assert len(by_key) == 12
+        assert by_key["autoswitch.sevenDayThreshold"]["value"] is None
         assert by_key["autoswitch.targetFiveHourMaxPct"]["value"] == 100.0
         assert by_key["autoswitch.threshold"]["value"] == 90.0
         assert by_key["autoswitch.threshold"]["isSet"] is False
