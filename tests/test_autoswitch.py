@@ -208,7 +208,21 @@ class TestIdleRebalance:
     def enable(self, h):
         h.engine.settings = replace(h.settings, idle_rebalance=True, target_five_hour_max_pct=90)
 
-    def test_idle_prefers_soonest_weekly_reset_then_most_remaining(self, harness):
+    def test_idle_spends_later_reset_account_with_higher_burn_rate(self, harness):
+        h = harness
+        self.enable(h)
+        usage = {
+            "1": {"five_hour": {"pct": 10}, "seven_day": {"pct": 80, "resets_at": _iso_at(h.clock() + 113 * 3600)}},
+            "2": {"five_hour": {"pct": 10}, "seven_day": {"pct": 37, "resets_at": _iso_at(h.clock() + 121 * 3600)}},
+            "3": {"five_hour": {"pct": 10}, "seven_day": {"pct": 0, "resets_at": _iso_at(h.clock() + 142 * 3600)}},
+        }
+        with patch.object(h.engine, "_idle_ready", return_value=(True, "cold")), \
+             patch.object(h.engine, "_freshen_target", return_value="ok"):
+            assert h.tick_with_usage(usage) is TickOutcome.SWITCHED
+            assert h.active_number() == 3
+            assert next(e for e in h.events if isinstance(e, SwitchEvent)).trigger == "idle-rebalance"
+
+    def test_idle_prefers_highest_weekly_burn_rate(self, harness):
         h = harness
         self.enable(h)
         with patch.object(h.engine, "_idle_ready", return_value=(True, "cold")), \
@@ -231,6 +245,7 @@ class TestIdleRebalance:
     def test_ceiling_excludes_best_weekly_candidate(self, harness, pct):
         self.enable(harness)
         usage = self.usage(harness)
+        usage["1"]["seven_day"]["pct"] = 60
         usage["3"]["five_hour"]["pct"] = pct
         with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")), \
              patch.object(harness.engine, "_freshen_target", return_value="ok"):
@@ -251,6 +266,7 @@ class TestIdleRebalance:
         usage = self.usage(harness)
         usage["2"]["seven_day"]["resets_at"] = _iso_at(harness.clock() + 7200)
         usage["3"]["seven_day"]["pct"] = weekly
+        usage["3"]["seven_day"]["resets_at"] = _iso_at(harness.clock() + 60)
         with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")), \
              patch.object(harness.engine, "_freshen_target", return_value="ok"):
             harness.tick_with_usage(usage)
@@ -287,6 +303,31 @@ class TestIdleRebalance:
             assert harness.tick_with_usage(usage) is TickOutcome.NO_ACTION
             assert harness.active_number() == 1
 
+    @pytest.mark.parametrize("strategy", ["best", "consume-first", "weekly-reset"])
+    def test_equal_burn_rate_keeps_active_even_with_later_reset(self, harness, strategy):
+        h = harness
+        self.enable(h)
+        h.engine.settings = replace(h.engine.settings, strategy=strategy)
+        usage = self.usage(h)
+        usage["1"]["seven_day"] = {"pct": 20, "resets_at": _iso_at(h.clock() + 4 * 3600)}
+        usage["2"]["seven_day"] = {"pct": 60, "resets_at": _iso_at(h.clock() + 2 * 3600)}
+        usage["3"]["seven_day"] = {"pct": 90, "resets_at": _iso_at(h.clock() + 3600)}
+        with patch.object(h.engine, "_idle_ready", return_value=(True, "cold")):
+            assert h.tick_with_usage(usage) is TickOutcome.NO_ACTION
+            assert h.active_number() == 1
+
+    def test_equal_peer_burn_rates_prefer_earlier_reset(self, harness):
+        h = harness
+        self.enable(h)
+        usage = self.usage(h)
+        usage["1"]["seven_day"]["pct"] = 90
+        usage["2"]["seven_day"] = {"pct": 20, "resets_at": _iso_at(h.clock() + 4 * 3600)}
+        usage["3"]["seven_day"] = {"pct": 60, "resets_at": _iso_at(h.clock() + 2 * 3600)}
+        with patch.object(h.engine, "_idle_ready", return_value=(True, "cold")), \
+             patch.object(h.engine, "_freshen_target", return_value="ok"):
+            assert h.tick_with_usage(usage) is TickOutcome.SWITCHED
+            assert h.active_number() == 3
+
     def test_existing_quota_switching_still_works_while_busy(self, harness):
         self.enable(harness)
         usage = self.usage(harness)
@@ -309,6 +350,40 @@ class TestIdleRebalance:
 
 class TestWeeklyResetStrategy:
     """Replay quota selection with fake measurements and isolated account files."""
+
+    def test_threshold_spends_later_reset_account_with_higher_burn_rate(self, harness):
+        h = harness
+        h.engine.settings = replace(h.settings, strategy="weekly-reset", threshold=94,
+                                    seven_day_threshold=99, target_five_hour_max_pct=94)
+        usage = {
+            "1": {"five_hour": {"pct": 94}, "seven_day": {"pct": 80, "resets_at": _iso_at(h.clock() + 113 * 3600)}},
+            "2": {"five_hour": {"pct": 10}, "seven_day": {"pct": 37, "resets_at": _iso_at(h.clock() + 121 * 3600)}},
+            "3": {"five_hour": {"pct": 10}, "seven_day": {"pct": 0, "resets_at": _iso_at(h.clock() + 142 * 3600)}},
+        }
+        assert h.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+        assert next(e for e in h.events if isinstance(e, SwitchEvent)).trigger == "proactive"
+
+    @pytest.mark.parametrize("active_five, trigger", [(94, "proactive"), (100, "at-limit"), (None, "failover")])
+    @pytest.mark.parametrize("peer_week, peer_hours, expected", [
+        (90, 1, 2),  # Nearly spent soon-reset quota loses to 80 points in 4h.
+        (0, 1, 3),   # Plenty of soon-reset quota still wins.
+        (60, 2, 3),  # Both need 20 points/h; earlier reset wins.
+    ])
+    def test_burn_rate_and_reset_ties_for_all_switch_triggers(self, harness, active_five, trigger,
+                                                           peer_week, peer_hours, expected):
+        h = harness
+        h.engine.settings = replace(h.settings, strategy="weekly-reset", threshold=94,
+                                    seven_day_threshold=99, target_five_hour_max_pct=94,
+                                    unhealthy_ticks=1)
+        usage = {
+            "1": _usage(active_five) if active_five is not None else None,
+            "2": {"five_hour": {"pct": 10}, "seven_day": {"pct": 20, "resets_at": _iso_at(h.clock() + 4 * 3600)}},
+            "3": {"five_hour": {"pct": 10}, "seven_day": {"pct": peer_week, "resets_at": _iso_at(h.clock() + peer_hours * 3600)}},
+        }
+        assert h.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert h.active_number() == expected
+        assert next(e for e in h.events if isinstance(e, SwitchEvent)).trigger == trigger
 
     @pytest.mark.parametrize("five, week, expected", [
         (20, 94, TickOutcome.NO_ACTION), (20, 98, TickOutcome.NO_ACTION),

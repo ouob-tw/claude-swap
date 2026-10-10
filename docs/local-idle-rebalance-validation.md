@@ -9,14 +9,15 @@ Unobserved or changed transcripts, including completed subagents, use a
 conservative one-hour quiet period. Main cache timing comes from Claude Code's
 status-line `prompt_cache.expires_at`; this is a client prediction.
 
-Fresh quota measurements rank enabled OAuth accounts by earliest weekly reset,
-then lowest weekly usage (most remaining quota). Equal rankings keep the active
-account. Five-hour usage at or above 94% remains excluded on this host. Idle state is
+Fresh quota measurements rank enabled OAuth accounts by weekly burn rate:
+`(100 - weekly usage %) / hours until weekly reset`, highest first. Equal rates
+keep the active account; ties between other candidates prefer the earlier reset.
+Five-hour usage at or above 94% remains excluded on this host. Idle state is
 rechecked before activation; cooldown is retained. Existing quota/failover
 switches continue independently. Idle preparation has no nightly time window.
 
 With `autoswitch.strategy=weekly-reset`, threshold/at-limit/failover switches
-use the same earliest-weekly-reset ordering, then most weekly quota remaining.
+use the same highest-weekly-burn-rate ordering, with earlier resets breaking ties.
 Missing weekly reset or usage excludes a candidate. Busy sessions below the
 94% threshold retain their account; the existing idle/cache guard continues to
 control preparation. This avoids `consume-first` moving below the threshold

@@ -1441,9 +1441,10 @@ class AutoSwitchEngine:
             if reset is None:
                 self._emit(NoSwitchEvent(reason="idle-reset-unknown"))
                 return TickOutcome.NO_ACTION
-            # Earliest weekly reset, then MOST remaining weekly quota. Keep
-            # the active account when both are tied so repeated ticks are stable.
-            ranked.append(((reset, weekly, num != current), num))
+            # Highest weekly quota burn rate first. On a rate tie, keep the
+            # active account; otherwise prefer the earlier weekly reset.
+            burn_rate = (100 - weekly) / ((reset - now) / 3600)
+            ranked.append(((-burn_rate, num != current, reset), num))
         ranked.sort()
         if not ranked or ranked[0][1] == current:
             self._emit(NoSwitchEvent(reason="idle-already-best"))
@@ -2056,7 +2057,8 @@ class AutoSwitchEngine:
             elif weekly_reset:
                 # Threshold-triggered selection shares idle preparation's
                 # weekly ordering, without moving a healthy busy session.
-                key = (reset_ts, weekly)
+                burn_rate = (100 - weekly) / ((reset_ts - now) / 3600)
+                key = (-burn_rate, reset_ts)
             elif consume_first:
                 # Soonest weekly reset first (unknown resets sort last), most
                 # headroom breaks ties, then sequence order.
