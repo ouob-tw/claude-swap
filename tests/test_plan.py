@@ -155,6 +155,35 @@ class TestSwitchRecordsPlan:
         assert switcher._get_sequence_data()["activeAccountNumber"] == 2
         assert "plan" not in _seq_text(switcher)
 
+    @pytest.mark.parametrize(
+        ("profile", "expected"),
+        [
+            ({"uuid": "uuid-real", "email": "account2@example.com", "organizationUuid": ""}, "max_5x"),
+            ({"uuid": "uuid-real", "email": "account2@example.com"}, None),
+            ({"uuid": "uuid-real", "email": "account2@example.com", "organizationUuid": "org-x"}, None),
+        ],
+        ids=["email-and-org-match", "org-absent", "org-differs"],
+    )
+    def test_legacy_slot_without_uuid(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
+        profiles, profile, expected,
+    ):
+        """A slot with no stored uuid is confirmed by an exact email match
+        with the organization present and equal -- and never backfilled."""
+        sample_sequence_data["accounts"]["2"]["uuid"] = ""
+        profiles["sk-two"] = profile
+        switcher, patches = _switch_setup(
+            temp_home, sample_sequence_data, _creds("two", sub="max", tier="default_claude_max_5x")
+        )
+        try:
+            switcher.switch_to("2", json_output=True)
+        finally:
+            for p in patches:
+                p.stop()
+        account = switcher._get_sequence_data()["accounts"]["2"]
+        assert account.get("plan", {}).get("id") == expected
+        assert account["uuid"] == ""
+
     def test_unrecognised_plan_is_stored_unknown(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
         profiles,

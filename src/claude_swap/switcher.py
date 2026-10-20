@@ -2004,13 +2004,17 @@ class ClaudeAccountSwitcher:
         """Whether ``creds`` resolves to slot ``account_num``'s own account.
 
         May hit the network (the profile endpoint), so never call it under
-        the locks; :meth:`_plan_owner_cached` is the lock-safe lookup for the
-        exact bytes about to be used. Verdicts are cached per lineage, so a
-        lineage costs one lookup per process. Uuid-positive only: a slot
-        without a stored uuid, a failed lookup or an expired token is "not
-        confirmed". A plan is only ever read from a login whose owner is
-        established this way, never from "it matches the stored backup" --
-        the backup itself may have been captured unverified.
+        the locks; :meth:`_plan_owner_cached` is the lock-safe lookup under
+        them. Definitive verdicts are cached per credential lineage and
+        stored slot identity (``_lineage_key``); failed or unverifiable
+        lookups are not cached and are retried on the next observation.
+        Same identity rule as :meth:`_resolved_matches_slot_identity`
+        (uuid first; for a slot without a stored uuid, an exact email match
+        with the resolved organization present and equal), minus its uuid
+        backfill. A failed lookup or an expired token is "not confirmed". A
+        plan is only ever read from a login whose owner is established this
+        way, never from "it matches the stored backup" -- the backup itself
+        may have been captured unverified.
         """
         if not creds:
             return False
@@ -2027,20 +2031,29 @@ class ClaudeAccountSwitcher:
             resolved = oauth.fetch_oauth_profile(token)
         except Exception:
             return False
-        own = self.account_identity(account_num)
-        r_uuid = ((resolved or {}).get("uuid") or "").strip()
-        if not r_uuid or not own["uuid"]:
+        if not resolved:
             return False
+        own = self.account_identity(account_num)
+        r_uuid = (resolved.get("uuid") or "").strip()
+        r_email = resolved.get("email")
         r_org = resolved.get("organizationUuid")
-        match = r_uuid == own["uuid"] and (
-            not r_org or not own["organizationUuid"]
-            or r_org == own["organizationUuid"]
-        )
+        if r_uuid and own["uuid"]:
+            match = r_uuid == own["uuid"] and (
+                not r_org or not own["organizationUuid"]
+                or r_org == own["organizationUuid"]
+            )
+        elif r_email and r_email == own["email"]:
+            if r_org is None:
+                return False  # org structurally absent: unverifiable
+            match = r_org == own["organizationUuid"]
+        else:
+            return False
         self._plan_owner_verdicts[key] = match
         return match
 
     def _plan_owner_cached(self, account_num: str, email: str, creds: str) -> bool:
-        """Lock-safe half of :meth:`_plan_owner_confirmed`: cache lookup only."""
+        """Lock-safe half of :meth:`_plan_owner_confirmed`: cache lookup only,
+        keyed by ``creds``' lineage and the slot's current stored identity."""
         return self._plan_owner_verdicts.get(
             self._lineage_key(
                 account_num, email, oauth.credential_fingerprint(creds) or ""
