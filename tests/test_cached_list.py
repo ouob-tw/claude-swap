@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import sys
 import time
@@ -63,6 +64,35 @@ def _seed(temp_home: Path, now: float = NOW) -> Path:
         "claudeAiOauth": {"accessToken": SECRET_ACTIVE, "refreshToken": SECRET_REFRESH},
     }))
     return backup
+
+
+_WRITE_EVENTS = {
+    "os.mkdir", "os.rename", "os.replace", "os.remove", "os.rmdir",
+    "os.symlink", "os.link", "os.truncate", "os.chmod", "os.utime",
+    "shutil.copyfile", "shutil.rmtree", "tempfile.mkstemp", "tempfile.mkdtemp",
+}
+# Audit hooks cannot be removed, so one is installed for the module and only
+# records while a test arms it.
+_writes: list | None = None
+
+
+def _record_writes(event: str, args: tuple) -> None:
+    if _writes is None:
+        return
+    if event == "open":
+        path, mode, flags = args
+        if mode is not None:
+            writing = any(c in mode for c in "wax+")
+        else:
+            writing = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT
+                                    | os.O_TRUNC | os.O_APPEND))
+        if writing:
+            _writes.append((event, path))
+    elif event in _WRITE_EVENTS:
+        _writes.append((event, args[0] if args else None))
+
+
+sys.addaudithook(_record_writes)
 
 
 def _tree(root: Path) -> dict[str, tuple[int, str]]:
@@ -219,10 +249,13 @@ class TestCachedOnlyCli:
         assert [a["usageStatus"] for a in payload["accounts"]] == [
             "ok", "unavailable", "unavailable"]
 
-    def test_reads_only(self, temp_home: Path, capsys):
-        """No network, no login refresh, no lock, no file created or changed."""
-        _seed(temp_home)
-        before = _tree(temp_home)
+    def test_reads_only(self, temp_home: Path, tmp_path: Path, capsys, monkeypatch):
+        """No network, no login refresh, no lock, no file write attempted."""
+        global _writes
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))  # store outside HOME
+        backup = _seed(temp_home)
+        assert not backup.is_relative_to(temp_home)
+        before = (_tree(temp_home), _tree(backup))
 
         def refuse(*_a, **_k):
             raise AssertionError("network or lock used")
@@ -234,10 +267,35 @@ class TestCachedOnlyCli:
              patch("claude_swap.oauth.request_usage_data", refuse), \
              patch("claude_swap.locking.FileLock.acquire", refuse), \
              patch("claude_swap.cli.ClaudeAccountSwitcher", side_effect=refuse):
-            code, out, _err = _run_cli(["list", "--json", "--cached-only"], capsys)
+            _writes = []
+            try:
+                code, out, _err = _run_cli(["list", "--json", "--cached-only"], capsys)
+                attempted = _writes
+            finally:
+                _writes = None
+        assert code == 0
+        assert json.loads(out)["accounts"][0]["usageStatus"] == "ok"
+        assert attempted == []
+        assert (_tree(temp_home), _tree(backup)) == before
+
+    @pytest.mark.parametrize("argv", [
+        ["--list", "--json", "--cached-only"],
+        ["ls", "--json", "--cached-only"],
+    ])
+    def test_list_spellings(self, temp_home: Path, capsys, argv):
+        _seed(temp_home)
+        code, out, _err = _run_cli(argv, capsys)
         assert code == 0
         assert json.loads(out)["cachedOnly"] is True
-        assert _tree(temp_home) == before
+
+    def test_no_usage_cache_file(self, temp_home: Path, capsys):
+        backup = _seed(temp_home)
+        (backup / "cache" / "usage.json").unlink()
+        code, out, _err = _run_cli(["list", "--json", "--cached-only"], capsys)
+        assert code == 0
+        rows = json.loads(out)["accounts"]
+        assert [r["usage"] for r in rows] == [None, None, None]
+        assert not any("lastGoodUsage" in r or "usageFetchedAt" in r for r in rows)
 
     def test_output_carries_no_secret(self, temp_home: Path, capsys):
         backup = _seed(temp_home)
@@ -258,12 +316,18 @@ class TestCachedOnlyCli:
         assert code == 0
         assert json.loads(out)["accounts"][0]["usageStatus"] == "ok"
 
-    @pytest.mark.parametrize("name", ["sequence.json", "cache/usage.json", ".claude.json"])
-    def test_torn_read_retried_once(self, temp_home: Path, capsys, name):
+    @pytest.mark.parametrize("name,broken", [
+        ("sequence.json", None),
+        ("sequence.json", "[]"),
+        ("cache/usage.json", None),
+        ("cache/usage.json", "[]"),
+        (".claude.json", None),
+    ])
+    def test_damaged_read_retried_once(self, temp_home: Path, capsys, name, broken):
         backup = _seed(temp_home)
         target = (temp_home if name == ".claude.json" else backup) / name
         good = target.read_text()
-        target.write_text(good[: len(good) // 2])
+        target.write_text(good[: len(good) // 2] if broken is None else broken)
         reads = []
 
         def heal(_delay):
@@ -276,13 +340,24 @@ class TestCachedOnlyCli:
         assert code == 0
         assert len(json.loads(out)["accounts"]) == 3
 
-    @pytest.mark.parametrize("name", ["sequence.json", "cache/usage.json", ".claude.json"])
-    def test_still_torn_after_retry_is_an_error_envelope(
-        self, temp_home: Path, capsys, name
+    @pytest.mark.parametrize("name,broken", [
+        ("sequence.json", '{"accounts": ['),
+        ("sequence.json", "[]"),
+        ("sequence.json", '{"sequence": [1], "accounts": []}'),
+        ("sequence.json", '{"sequence": 1, "accounts": {}}'),
+        ("sequence.json", '{"sequence": [1], "accounts": {"1": "x"}}'),
+        ("cache/usage.json", '{"accounts": ['),
+        ("cache/usage.json", "[]"),
+        ("cache/usage.json", '{"schemaVersion": 2, "accounts": []}'),
+        (".claude.json", '{"oauthAccount": '),
+        (".claude.json", "[]"),
+    ])
+    def test_still_damaged_after_retry_is_an_error_envelope(
+        self, temp_home: Path, capsys, name, broken
     ):
         backup = _seed(temp_home)
         target = (temp_home if name == ".claude.json" else backup) / name
-        target.write_text("{\"accounts\": [")
+        target.write_text(broken)
         sleeps = []
         with patch("claude_swap.cached_list.time.sleep", side_effect=sleeps.append):
             code, out, _err = _run_cli(["list", "--json", "--cached-only"], capsys)
@@ -291,3 +366,10 @@ class TestCachedOnlyCli:
         payload = json.loads(out)
         assert set(payload) == {"schemaVersion", "error"}
         assert payload["error"]["type"] == "ConfigError"
+
+    def test_other_usage_schema_reads_as_no_cache(self, temp_home: Path, capsys):
+        backup = _seed(temp_home)
+        (backup / "cache" / "usage.json").write_text('{"schemaVersion": 99, "accounts": {}}')
+        code, out, _err = _run_cli(["list", "--json", "--cached-only"], capsys)
+        assert code == 0
+        assert [r["usage"] for r in json.loads(out)["accounts"]] == [None, None, None]

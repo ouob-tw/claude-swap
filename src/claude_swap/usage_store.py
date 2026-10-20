@@ -866,7 +866,8 @@ class UsageStore:
     def _read_rows(self, *, strict: bool = False) -> dict[str, dict]:
         """Stored rows; a missing or unreadable file reads as empty, except
         that ``strict`` raises ``ValueError`` for a file that is there but
-        unreadable (a torn write, say) instead of serving it as no cache."""
+        unreadable or malformed (a torn write, say) instead of serving it as
+        no cache. Another schema version reads as empty either way."""
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -875,9 +876,13 @@ class UsageStore:
             if strict:
                 raise ValueError(f"{self.path} could not be read ({e})") from e
             return {}
+        if strict and not isinstance(raw, dict):
+            raise ValueError(f"{self.path} holds {type(raw).__name__}, not a JSON object")
         if not isinstance(raw, dict) or raw.get("schemaVersion") != SCHEMA_VERSION:
             return {}  # legacy snapshot or future schema: start empty
         rows = raw.get("accounts")
+        if strict and not isinstance(rows, dict):
+            raise ValueError(f"{self.path} has no accounts object")
         return rows if isinstance(rows, dict) else {}
 
     def _write_rows(self, rows: dict[str, dict]) -> None:

@@ -80,12 +80,18 @@ def _build(backup_dir: Path, clock: Callable[[], float]) -> dict:
         "activeAccountNumber": None,
         "accounts": [],
     }
-    data = _read_object(backup_dir / "sequence.json")
+    sequence_file = backup_dir / "sequence.json"
+    data = _read_object(sequence_file)
     if data is not None:
-        active_slot = _active_slot(data)
         records = data.get("accounts", {})
+        sequence = data.get("sequence", [])
+        if not isinstance(records, dict) or not isinstance(sequence, list) or not all(
+            isinstance(r, dict) for r in records.values()
+        ):
+            raise ConfigError(f"{sequence_file} is malformed")
+        active_slot = _active_slot(data)
         roster = []
-        for num in data.get("sequence", []):
+        for num in sequence:
             record = records.get(str(num), {})
             email = record.get("email", "unknown")
             org_uuid = record.get("organizationUuid", "") or ""
