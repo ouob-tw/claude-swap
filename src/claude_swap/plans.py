@@ -54,7 +54,7 @@ def plan_view(account: dict | None) -> dict:
     """``{id, label, multiplier, observedAt}`` for a sequence-file record."""
     stored = (account or {}).get("plan")
     plan_id = stored.get("id") if isinstance(stored, dict) else None
-    if plan_id not in PLANS:
+    if not isinstance(plan_id, str) or plan_id not in PLANS:
         return {
             "id": UNKNOWN,
             "label": PLANS[UNKNOWN][0],

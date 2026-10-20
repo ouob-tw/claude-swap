@@ -2003,27 +2003,33 @@ class ClaudeAccountSwitcher:
         it wrote.
         """
         account_num = str(account_num)
-        email = self.account_email(account_num)
-        live = self._read_credentials()
-        if not email or not live:
-            return False
-        fp = oauth.credential_fingerprint(live)
-        backup = self._read_account_credentials(account_num, email)
-        if not (
-            (backup and oauth.credential_fingerprint(backup) == fp)
-            or self._probe_verdicts.get(
-                self._lineage_key(account_num, email, fp or "")
-            ) is True
-        ):
-            return False
-        with FileLock(self.lock_file):
-            # Re-check under the lock: a switch landing since the read above
-            # would have the plan filed against the wrong slot.
-            if self.current_account_number() != account_num:
-                return False
+        # Everything under the lock, from one sequence read: a switch, add or
+        # slot replacement landing between a check and the write would
+        # otherwise file this login's plan on another account's record.
+        with FileLock(self.lock_file), claude_credentials_lock():
             data = self._get_sequence_data() or {}
             account = data.get("accounts", {}).get(account_num)
-            if account is None or not plans.record_plan(
+            identity = self._get_current_account()
+            if (
+                account is None
+                or identity is None
+                or self._find_account_slot(data, *identity) != account_num
+            ):
+                return False
+            email = account.get("email", "")
+            live = self._read_credentials()
+            if not email or not live:
+                return False
+            fp = oauth.credential_fingerprint(live)
+            backup = self._read_account_credentials(account_num, email)
+            if not (
+                (backup and oauth.credential_fingerprint(backup) == fp)
+                or self._probe_verdicts.get(
+                    self._lineage_key(account_num, email, fp or "")
+                ) is True
+            ):
+                return False
+            if not plans.record_plan(
                 account,
                 plans.plan_id_from_credentials(live),
                 self._usage_store.clock(),
@@ -3252,8 +3258,12 @@ class ClaudeAccountSwitcher:
 
     def _reject_foreign_credential_capture(
         self, creds: str, email: str, org_uuid: str, account_uuid: str
-    ) -> str:
+    ) -> tuple[str, bool]:
         """Guard for ``add_account``: the stored token must be THIS account's.
+
+        Returns ``(creds, confirmed)``; ``confirmed`` is False on every
+        fail-open arm below (ownership or organization left unverified), so
+        callers can keep facts read from the token out of the record.
 
         ``add_account`` reads the IDENTITY from ``.claude.json``'s
         ``oauthAccount`` and the CREDENTIAL from the keychain/file store.
@@ -3297,7 +3307,7 @@ class ClaudeAccountSwitcher:
         email already matches, so it never excuses a disagreeing email --
         only a matching email gets the benefit of an absent org.
         """
-        def unverified(why: str) -> str:
+        def unverified(why: str) -> tuple[str, bool]:
             # Fail-open, but never silently: registering with the ownership
             # question unanswered is the state the field incident was in.
             print(
@@ -3305,7 +3315,7 @@ class ClaudeAccountSwitcher:
                 f"credential belongs to {email} ({why}). Registering anyway; "
                 f"re-run where the check can complete to confirm."
             )
-            return creds
+            return creds, False
 
         token = oauth.extract_access_token(creds)
         if not token:
@@ -3362,10 +3372,10 @@ class ClaudeAccountSwitcher:
                 )
         resolved_org = profile.get("organizationUuid")
         if resolved_org is None:
-            return creds                      # structurally absent -- unverifiable
+            return creds, False               # structurally absent -- unverifiable
         seen_org = resolved_org.strip()
         if seen_org == (org_uuid or ""):
-            return creds
+            return creds, True
         # Same address, different org: naming the address twice says
         # nothing (it's the address that agrees) -- name the two
         # organizations that disagree instead.
@@ -3617,9 +3627,11 @@ class ClaudeAccountSwitcher:
             if not current_creds:
                 raise CredentialReadError("No credentials found for current account")
             self._reject_live_api_key_capture(current_creds)
-            current_creds = self._reject_foreign_credential_capture(
-                current_creds, current_email, current_org_uuid,
-                current_account_uuid,
+            current_creds, owner_confirmed = (
+                self._reject_foreign_credential_capture(
+                    current_creds, current_email, current_org_uuid,
+                    current_account_uuid,
+                )
             )
             self._reject_credential_drift_since_verify(current_creds)
 
@@ -3652,10 +3664,11 @@ class ClaudeAccountSwitcher:
 
             if alias is not None:
                 seq["accounts"][account_num]["alias"] = alias
-            plans.record_plan(
-                seq["accounts"][account_num],
-                plans.plan_id_from_credentials(current_creds),
-            )
+            if owner_confirmed:
+                plans.record_plan(
+                    seq["accounts"][account_num],
+                    plans.plan_id_from_credentials(current_creds),
+                )
 
             seq["activeAccountNumber"] = int(account_num)
             seq["lastUpdated"] = get_timestamp()
@@ -3748,7 +3761,7 @@ class ClaudeAccountSwitcher:
         if not current_creds:
             raise CredentialReadError("No credentials found for current account")
         self._reject_live_api_key_capture(current_creds)
-        current_creds = self._reject_foreign_credential_capture(
+        current_creds, owner_confirmed = self._reject_foreign_credential_capture(
             current_creds, current_email, current_org_uuid, current_account_uuid
         )
         self._reject_credential_drift_since_verify(current_creds)
@@ -3809,10 +3822,11 @@ class ClaudeAccountSwitcher:
         carried_alias = alias if alias is not None else existing_alias
         if carried_alias:
             data["accounts"][account_num]["alias"] = carried_alias
-        plans.record_plan(
-            data["accounts"][account_num],
-            plans.plan_id_from_credentials(current_creds),
-        )
+        if owner_confirmed:
+            plans.record_plan(
+                data["accounts"][account_num],
+                plans.plan_id_from_credentials(current_creds),
+            )
         if int(account_num) not in data["sequence"]:
             data["sequence"].append(int(account_num))
             data["sequence"].sort()

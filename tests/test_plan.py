@@ -18,7 +18,7 @@ from claude_swap.tui.widgets import account_card_text, mini_account_text
 from claude_swap.usage_store import UsageEntry
 
 from tests.test_autoswitch import EngineHarness
-from tests.test_switcher import TestPerformSwitchPostDisplay
+from tests.test_switcher import TestPerformSwitchPostDisplay as _SwitchHelpers
 
 ISO_UTC = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
@@ -69,7 +69,11 @@ class TestPlanMapping:
         assert (view["label"], view["multiplier"]) == (label, multiplier)
 
     @pytest.mark.parametrize(
-        "record", [None, {}, {"plan": None}, {"plan": "pro"}, {"plan": {"id": "team"}}]
+        "record",
+        [
+            None, {}, {"plan": None}, {"plan": "pro"}, {"plan": {"id": "team"}},
+            {"plan": {"id": []}}, {"plan": {"id": {}}},
+        ],
     )
     def test_missing_or_malformed_record_reads_unknown(self, record):
         assert plans.plan_view(record) == {
@@ -79,11 +83,11 @@ class TestPlanMapping:
 
 def _switch_setup(temp_home, sample_sequence_data, target_creds):
     switcher, creds_store, configs_store = (
-        TestPerformSwitchPostDisplay()._setup_two_accounts(temp_home, sample_sequence_data)
+        _SwitchHelpers()._setup_two_accounts(temp_home, sample_sequence_data)
     )
     creds_store[("2", "account2@example.com")] = target_creds
     live_state = {"creds": (temp_home / ".claude" / ".credentials.json").read_text()}
-    patches = TestPerformSwitchPostDisplay._install_store_patches(
+    patches = _SwitchHelpers._install_store_patches(
         switcher, creds_store, configs_store, live_state
     )
     return switcher, patches
@@ -131,9 +135,13 @@ class TestAddRecordsPlan:
         switcher._init_sequence_file()
         return switcher
 
-    def _add(self, switcher, creds):
+    OWNER = {"uuid": "test-uuid-1234", "email": "test@example.com", "organizationUuid": ""}
+
+    def _add(self, switcher, creds, profile=OWNER):
         stored: dict = {}
-        with patch.object(
+        with patch(
+            "claude_swap.oauth.fetch_oauth_profile", return_value=profile
+        ), patch.object(
             switcher, "_read_active_credentials",
             return_value=ActiveCredentials(creds, False),
         ), patch.object(
@@ -159,11 +167,25 @@ class TestAddRecordsPlan:
         self, temp_home: Path, mock_claude_config: Path, capsys
     ):
         switcher = self._switcher()
-        with patch(
-            "claude_swap.oauth.fetch_oauth_profile",
-            return_value={"uuid": "someone-else", "email": "x@example.com"},
-        ), pytest.raises(ConfigError):
-            self._add(switcher, _creds("a", sub="pro"))
+        with pytest.raises(ConfigError):
+            self._add(
+                switcher, _creds("a", sub="pro"),
+                profile={"uuid": "someone-else", "email": "x@example.com"},
+            )
+        assert "plan" not in _seq_text(switcher)
+
+    @pytest.mark.parametrize(
+        "profile",
+        [None, {"uuid": "test-uuid-1234", "email": "test@example.com"}],
+        ids=["lookup-failed", "org-unverifiable"],
+    )
+    def test_unconfirmed_owner_adds_without_plan(
+        self, temp_home: Path, mock_claude_config: Path, capsys, profile
+    ):
+        switcher = self._switcher()
+        self._add(switcher, _creds("a", sub="pro"), profile=profile)
+        assert "1" in switcher._get_sequence_data()["accounts"]
+        self._add(switcher, _creds("b", sub="pro"), profile=profile)
         assert "plan" not in _seq_text(switcher)
 
 
@@ -199,6 +221,29 @@ class TestAutoRecordsPlan:
     def test_foreign_live_credential_is_not_recorded(self, h):
         self.live.write_text(_creds("other", sub="max", tier="default_claude_max_5x"))
         self._tick(h)
+        assert "plan" not in h.switcher._get_sequence_data()["accounts"]["1"]
+
+    def test_login_replaced_before_lock_records_nothing(self, h):
+        """The live login is read under the lock, not before it: a foreign
+        login landing just before the lock is taken is never filed."""
+        import claude_swap.switcher as switcher_mod
+
+        real_lock = switcher_mod.FileLock
+        live = self.live
+
+        class SwapOnEnter:
+            def __init__(self, *a, **kw):
+                self._lock = real_lock(*a, **kw)
+
+            def __enter__(self):
+                live.write_text(_creds("other", sub="max", tier="default_claude_max_20x"))
+                return self._lock.__enter__()
+
+            def __exit__(self, *exc):
+                return self._lock.__exit__(*exc)
+
+        with patch.object(switcher_mod, "FileLock", SwapOnEnter):
+            assert h.switcher.record_active_plan("1") is False
         assert "plan" not in h.switcher._get_sequence_data()["accounts"]["1"]
 
     def test_dry_run_records_nothing(self, h):
