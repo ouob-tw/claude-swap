@@ -1107,6 +1107,14 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         help="Show source-labelled OAuth token diagnostics (use with 'list')",
     )
     parser.add_argument(
+        "--cached-only",
+        action="store_true",
+        help=(
+            "With 'list --json': serve stored data only (no network, no login "
+            "refresh, no file writes) for dashboards that poll"
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help=(
@@ -1333,6 +1341,9 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     if args.json and not (args.list or args.status or args.switch or args.switch_to):
         parser.error("--json can only be used with 'list', 'status', or 'switch'")
 
+    if args.cached_only and not (args.list and args.json):
+        parser.error("--cached-only can only be used with 'list --json'")
+
     if args.json and args.token_status:
         # Token status is not part of the JSON v1 schema; reject rather than
         # silently ignore it (a future additive field can add it).
@@ -1400,6 +1411,13 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     # serializes it (so no command writes JSON to stdout itself).
     payload: dict | None = None
     try:
+        if args.cached_only:
+            # Read-only: no switcher, whose setup migrates data and opens the log.
+            from claude_swap.cached_list import cached_list_payload
+
+            print(json.dumps(cached_list_payload(paths.get_backup_root()), indent=2))
+            return
+
         switcher = ClaudeAccountSwitcher(debug=args.debug)
 
         # Check for root (unless in container) - POSIX only

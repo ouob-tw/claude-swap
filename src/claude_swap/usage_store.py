@@ -863,14 +863,26 @@ class UsageStore:
     def _lock(self) -> FileLock:
         return FileLock(self._lock_path)
 
-    def _read_rows(self) -> dict[str, dict]:
+    def _read_rows(self, *, strict: bool = False) -> dict[str, dict]:
+        """Stored rows; a missing or unreadable file reads as empty, except
+        that ``strict`` raises ``ValueError`` for a file that is there but
+        unreadable or malformed (a torn write, say) instead of serving it as
+        no cache. Another schema version reads as empty either way."""
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        except FileNotFoundError:
             return {}
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            if strict:
+                raise ValueError(f"{self.path} could not be read ({e})") from e
+            return {}
+        if strict and not isinstance(raw, dict):
+            raise ValueError(f"{self.path} holds {type(raw).__name__}, not a JSON object")
         if not isinstance(raw, dict) or raw.get("schemaVersion") != SCHEMA_VERSION:
             return {}  # legacy snapshot or future schema: start empty
         rows = raw.get("accounts")
+        if strict and not isinstance(rows, dict):
+            raise ValueError(f"{self.path} has no accounts object")
         return rows if isinstance(rows, dict) else {}
 
     def _write_rows(self, rows: dict[str, dict]) -> None:
@@ -895,6 +907,8 @@ class UsageStore:
         self,
         identities: dict[str, Identity],
         models: tuple[str, ...] = (),
+        *,
+        strict: bool = False,
     ) -> dict[str, UsageEntry]:
         """Identity-guarded snapshot for the given slots (empty entry when the
         row is missing or belongs to a different account).
@@ -902,9 +916,10 @@ class UsageStore:
         ``models`` are the configured scoped-window model names; they let the
         429-stale trust bound also honor per-model (e.g. Fable) window resets,
         matching the scheduler's window view. Omitted (``()``) for callers that
-        only read timestamps/last-good and never consult scoped resets."""
+        only read timestamps/last-good and never consult scoped resets.
+        ``strict`` is passed to :meth:`_read_rows`."""
         now = self.clock()
-        rows = self._read_rows()
+        rows = self._read_rows(strict=strict)
         out: dict[str, UsageEntry] = {}
         for num, identity in identities.items():
             row = rows.get(num)
