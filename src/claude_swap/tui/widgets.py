@@ -17,6 +17,7 @@ from textual.widgets import ListItem, Static
 from claude_swap import pace
 from claude_swap.json_output import USAGE_API_KEY
 from claude_swap.models import AccountSnapshot
+from claude_swap.plans import PLANS
 from claude_swap.switcher import ERROR_NOTES
 from claude_swap.usage_store import STALE_OK_S
 from claude_swap.tui import data
@@ -174,6 +175,7 @@ def account_card_text(
     else:
         text.append(acc.email, style=palette.foreground)
     text.append(f"  [{acc.display_tag}]", style=palette.muted)
+    text.append(f"  {PLANS[acc.plan][0]}", style=palette.foreground)
     if acc.is_active:
         text.append("   ● active", style=f"bold {palette.accent}")
     if acc.disabled:
@@ -253,6 +255,7 @@ def mini_account_text(
     else:
         text.append(acc.email, style=palette.foreground)
     text.append(f"  [{acc.display_tag}]", style=palette.muted)
+    text.append(f"  {PLANS[acc.plan][0]}", style=palette.foreground)
     if acc.disabled:
         text.append("  (disabled)", style=palette.muted)
     text.append("   ")

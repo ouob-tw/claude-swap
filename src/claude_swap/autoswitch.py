@@ -979,6 +979,14 @@ class AutoSwitchEngine:
             )
         )
 
+        if not self.dry_run:
+            # The live login's identity was just confirmed as `current`; file
+            # its plan. Best effort -- never worth failing a tick over.
+            try:
+                self.switcher.record_active_plan(current)
+            except Exception:
+                _logger.debug("Recording the active plan failed", exc_info=True)
+
         if not self._model_check_done:
             self._check_model_names(quarantined, usage)
 

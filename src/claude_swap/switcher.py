@@ -26,7 +26,7 @@ from claude_swap.exceptions import (
     SwitchError,
     ValidationError,
 )
-from claude_swap import oauth, pace
+from claude_swap import oauth, pace, plans
 from claude_swap.claude_locks import claude_config_lock, claude_credentials_lock
 from claude_swap.json_output import (
     SCHEMA_VERSION,
@@ -376,6 +376,12 @@ class ClaudeAccountSwitcher:
         # a persistent drift state from re-probing the profile endpoint
         # every collect pass.
         self._probe_verdicts: dict[
+            tuple[str, str, str, str, str, str], bool
+        ] = {}
+        # Plan observation's own ownership verdicts, keyed like
+        # _probe_verdicts but kept apart from them: they only gate reading a
+        # login's plan, never the backup/switch provenance decisions.
+        self._plan_owner_verdicts: dict[
             tuple[str, str, str, str, str, str], bool
         ] = {}
 
@@ -1774,6 +1780,7 @@ class ClaudeAccountSwitcher:
                     usage=entries[n],
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, n),
+                    plan=plans.plan_view(seq_data.get("accounts", {}).get(n))["id"],
                 )
             )
         return AccountsSnapshot(
@@ -1978,6 +1985,124 @@ class ClaudeAccountSwitcher:
             "organizationUuid": acct.get("organizationUuid", "") or "",
             "uuid": (acct.get("uuid") or "").strip(),
         }
+
+    def account_plan(self, account_num: str) -> dict:
+        """Stored plan for a slot: ``{"id", "label", "multiplier", "observedAt"}``.
+
+        A slot whose plan was never observed reads as ``unknown`` (multiplier 1).
+        """
+        data = self._get_sequence_data() or {}
+        return plans.plan_view(data.get("accounts", {}).get(str(account_num)))
+
+    def account_plan_multiplier(self, account_num: str) -> int:
+        """Quota multiplier of a slot's plan relative to Pro; 1 when unknown."""
+        return self.account_plan(account_num)["multiplier"]
+
+    def _plan_owner_confirmed(
+        self, account_num: str, email: str, creds: str
+    ) -> bool:
+        """Whether ``creds`` resolves to slot ``account_num``'s own account.
+
+        May hit the network (the profile endpoint), so never call it under
+        the locks; :meth:`_plan_owner_cached` is the lock-safe lookup under
+        them. Definitive verdicts are cached per credential lineage and
+        stored slot identity (``_lineage_key``); failed or unverifiable
+        lookups are not cached and are retried on the next observation.
+        Same identity rule as :meth:`_resolved_matches_slot_identity`
+        (uuid first; for a slot without a stored uuid, an exact email match
+        with the resolved organization present and equal), minus its uuid
+        backfill. A failed lookup or an expired token is "not confirmed". A
+        plan is only ever read from a login whose owner is established this
+        way, never from "it matches the stored backup" -- the backup itself
+        may have been captured unverified.
+        """
+        if not creds:
+            return False
+        key = self._lineage_key(
+            account_num, email, oauth.credential_fingerprint(creds) or ""
+        )
+        if key in self._plan_owner_verdicts:
+            return self._plan_owner_verdicts[key]
+        token = oauth.extract_access_token(creds)
+        oauth_data = oauth.extract_oauth_data(creds) or {}
+        if not token or oauth.is_oauth_token_expired(oauth_data.get("expiresAt")):
+            return False
+        try:
+            resolved = oauth.fetch_oauth_profile(token)
+        except Exception:
+            return False
+        if not resolved:
+            return False
+        own = self.account_identity(account_num)
+        r_uuid = (resolved.get("uuid") or "").strip()
+        r_email = resolved.get("email")
+        r_org = resolved.get("organizationUuid")
+        if r_uuid and own["uuid"]:
+            match = r_uuid == own["uuid"] and (
+                not r_org or not own["organizationUuid"]
+                or r_org == own["organizationUuid"]
+            )
+        elif r_email and r_email == own["email"]:
+            if r_org is None:
+                return False  # org structurally absent: unverifiable
+            match = r_org == own["organizationUuid"]
+        else:
+            return False
+        self._plan_owner_verdicts[key] = match
+        return match
+
+    def _plan_owner_cached(self, account_num: str, email: str, creds: str) -> bool:
+        """Lock-safe half of :meth:`_plan_owner_confirmed`: cache lookup only,
+        keyed by ``creds``' lineage and the slot's current stored identity."""
+        return self._plan_owner_verdicts.get(
+            self._lineage_key(
+                account_num, email, oauth.credential_fingerprint(creds) or ""
+            )
+        ) is True
+
+    def record_active_plan(self, account_num: str) -> bool:
+        """Record the live login's plan on the active slot ``account_num``.
+
+        Only when the live credential resolves to this slot's own account
+        (see :meth:`_plan_owner_confirmed`); a foreign, unverified or
+        unresolvable credential records nothing. Writes the sequence file
+        only when the plan changed or its ``observedAt`` is due a refresh.
+        Returns whether it wrote.
+        """
+        account_num = str(account_num)
+        email = self.account_email(account_num)
+        if not email or not self._plan_owner_confirmed(
+            account_num, email, self._read_credentials() or ""
+        ):
+            return False
+        # Re-validate under the lock, from one sequence read and a fresh
+        # credential read: a switch, add, re-login or slot replacement
+        # landing since the lookup would otherwise file this login's plan on
+        # another account's record.
+        with FileLock(self.lock_file), claude_credentials_lock():
+            data = self._get_sequence_data() or {}
+            account = data.get("accounts", {}).get(account_num)
+            identity = self._get_current_account()
+            if (
+                account is None
+                or identity is None
+                or self._find_account_slot(data, *identity) != account_num
+            ):
+                return False
+            email = account.get("email", "")
+            live = self._read_credentials()
+            if not email or not live or not self._plan_owner_cached(
+                account_num, email, live
+            ):
+                return False
+            if not plans.record_plan(
+                account,
+                plans.plan_id_from_credentials(live),
+                self._usage_store.clock(),
+            ):
+                return False
+            self._write_json(self.sequence_file, data)
+        return True
 
     def backfill_account_uuid(
         self,
@@ -3199,8 +3324,12 @@ class ClaudeAccountSwitcher:
 
     def _reject_foreign_credential_capture(
         self, creds: str, email: str, org_uuid: str, account_uuid: str
-    ) -> str:
+    ) -> tuple[str, bool]:
         """Guard for ``add_account``: the stored token must be THIS account's.
+
+        Returns ``(creds, confirmed)``; ``confirmed`` is False on every
+        fail-open arm below (ownership or organization left unverified), so
+        callers can keep facts read from the token out of the record.
 
         ``add_account`` reads the IDENTITY from ``.claude.json``'s
         ``oauthAccount`` and the CREDENTIAL from the keychain/file store.
@@ -3244,7 +3373,7 @@ class ClaudeAccountSwitcher:
         email already matches, so it never excuses a disagreeing email --
         only a matching email gets the benefit of an absent org.
         """
-        def unverified(why: str) -> str:
+        def unverified(why: str) -> tuple[str, bool]:
             # Fail-open, but never silently: registering with the ownership
             # question unanswered is the state the field incident was in.
             print(
@@ -3252,7 +3381,7 @@ class ClaudeAccountSwitcher:
                 f"credential belongs to {email} ({why}). Registering anyway; "
                 f"re-run where the check can complete to confirm."
             )
-            return creds
+            return creds, False
 
         token = oauth.extract_access_token(creds)
         if not token:
@@ -3309,10 +3438,10 @@ class ClaudeAccountSwitcher:
                 )
         resolved_org = profile.get("organizationUuid")
         if resolved_org is None:
-            return creds                      # structurally absent -- unverifiable
+            return creds, False               # structurally absent -- unverifiable
         seen_org = resolved_org.strip()
         if seen_org == (org_uuid or ""):
-            return creds
+            return creds, True
         # Same address, different org: naming the address twice says
         # nothing (it's the address that agrees) -- name the two
         # organizations that disagree instead.
@@ -3564,9 +3693,11 @@ class ClaudeAccountSwitcher:
             if not current_creds:
                 raise CredentialReadError("No credentials found for current account")
             self._reject_live_api_key_capture(current_creds)
-            current_creds = self._reject_foreign_credential_capture(
-                current_creds, current_email, current_org_uuid,
-                current_account_uuid,
+            current_creds, owner_confirmed = (
+                self._reject_foreign_credential_capture(
+                    current_creds, current_email, current_org_uuid,
+                    current_account_uuid,
+                )
             )
             self._reject_credential_drift_since_verify(current_creds)
 
@@ -3599,6 +3730,11 @@ class ClaudeAccountSwitcher:
 
             if alias is not None:
                 seq["accounts"][account_num]["alias"] = alias
+            if owner_confirmed:
+                plans.record_plan(
+                    seq["accounts"][account_num],
+                    plans.plan_id_from_credentials(current_creds),
+                )
 
             seq["activeAccountNumber"] = int(account_num)
             seq["lastUpdated"] = get_timestamp()
@@ -3691,7 +3827,7 @@ class ClaudeAccountSwitcher:
         if not current_creds:
             raise CredentialReadError("No credentials found for current account")
         self._reject_live_api_key_capture(current_creds)
-        current_creds = self._reject_foreign_credential_capture(
+        current_creds, owner_confirmed = self._reject_foreign_credential_capture(
             current_creds, current_email, current_org_uuid, current_account_uuid
         )
         self._reject_credential_drift_since_verify(current_creds)
@@ -3752,6 +3888,11 @@ class ClaudeAccountSwitcher:
         carried_alias = alias if alias is not None else existing_alias
         if carried_alias:
             data["accounts"][account_num]["alias"] = carried_alias
+        if owner_confirmed:
+            plans.record_plan(
+                data["accounts"][account_num],
+                plans.plan_id_from_credentials(current_creds),
+            )
         if int(account_num) not in data["sequence"]:
             data["sequence"].append(int(account_num))
             data["sequence"].sort()
@@ -5552,6 +5693,9 @@ class ClaudeAccountSwitcher:
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, str(num)),
                     login_expires_at=oauth.login_expires_at_iso(creds),
+                    plan=plans.plan_view(
+                        seq_data.get("accounts", {}).get(str(num))
+                    ),
                 )
             )
         payload = {
@@ -5616,7 +5760,8 @@ class ClaudeAccountSwitcher:
                 markers += f" {bold_accent('(active)')}"
             if self._disabled_from_data(seq_data, str(num)):
                 markers += f" {muted('(disabled)')}"
-            print(f"  {num}: {label} {muted(f'[{tag}]')}{markers}")
+            plan = plans.plan_view(seq_data.get("accounts", {}).get(str(num)))
+            print(f"  {num}: {label} {muted(f'[{tag}]')} {plan['label']}{markers}")
             for line in _usage_entry_lines(entries[str(num)]):
                 print(f"     {line}")
 
@@ -6855,6 +7000,14 @@ class ClaudeAccountSwitcher:
                 if force_activate
                 else self._prefetch_live_identity()
             )
+        # Whose login the target's stored credential is: network, so before
+        # the locks. The plan is recorded below only for a confirmed owner.
+        if pre_email:
+            self._plan_owner_confirmed(
+                target_account,
+                pre_email,
+                self._read_account_credentials(target_account, pre_email),
+            )
 
         # Beyond cswap's own lock, hold Claude Code's advisory locks for the
         # whole mutation (including rollback paths): its token refresh runs
@@ -7029,6 +7182,13 @@ class ClaudeAccountSwitcher:
 
                     data["activeAccountNumber"] = int(target_account)
                     data["lastUpdated"] = get_timestamp()
+                    if self._plan_owner_cached(
+                        target_account, target_email, target_creds
+                    ):
+                        plans.record_plan(
+                            data["accounts"][target_account],
+                            plans.plan_id_from_credentials(target_creds),
+                        )
                     self._write_json(self.sequence_file, data)
                 except Exception:
                     if config_written and rollback_config_text is not None:
@@ -7295,6 +7455,13 @@ class ClaudeAccountSwitcher:
                 # Step 5: Update sequence state
                 data["activeAccountNumber"] = int(target_account)
                 data["lastUpdated"] = get_timestamp()
+                if self._plan_owner_cached(
+                    target_account, target_email, target_creds
+                ):
+                    plans.record_plan(
+                        data["accounts"][target_account],
+                        plans.plan_id_from_credentials(target_creds),
+                    )
                 self._write_json(self.sequence_file, data)
                 transaction.record_step("sequence_updated")
 
