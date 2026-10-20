@@ -383,3 +383,19 @@ class TestAtomicWriteThroughSymlink:
         assert (repo.stat().st_mode & 0o777) == 0o755, "foreign dir untouched"
         assert (live.stat().st_mode & 0o777) == 0o700, "our dir hardened"
         assert (tracked.stat().st_mode & 0o777) == 0o600, "file still 0600"
+
+
+class TestSmallPlanSettings:
+    @pytest.mark.parametrize("hours, remaining, expected_hours, expected_remaining", [
+        (30, 15, 30, 15), (0, -1, 1, 0), (169, 101, 168, 100),
+        ("invalid", "invalid", 24, 20),
+    ])
+    def test_load_new_settings(self, tmp_path, hours, remaining, expected_hours, expected_remaining):
+        settings_path(tmp_path).write_text(json.dumps({"autoswitch": {
+            "strategy": "small-plan-first", "bigPlanResetHours": hours,
+            "bigPlanMinRemainingPct": remaining,
+        }}))
+        settings = load_settings(tmp_path)
+        assert settings.strategy == "small-plan-first"
+        assert settings.big_plan_reset_hours == expected_hours
+        assert settings.big_plan_min_remaining_pct == expected_remaining
