@@ -378,6 +378,8 @@ Usage is served from a per-account cache: when the usage API is briefly unreacha
 
 A row carries an additive `loginExpiresAt` (ISO-8601 UTC) when the stored login records when its refresh token expires, which is the moment the slot will need a fresh `/login` and `cswap add --slot N`; a script can warn a few days ahead instead of discovering `relogin_required`. Absent when Claude Code recorded no such date for that login.
 
+`cswap list --json --cached-only` serves the same payload from stored data alone, for dashboards that poll: no network, no login refresh, no lock and no file written, so it is safe beside a running `cswap auto`. It adds top-level `"cachedOnly": true` and `generatedAt` (ISO-8601 UTC); rows follow the cache only, so `loginExpiresAt` is always absent and states only a stored login can reveal (`no_credentials`, `token_expired`, `relogin_required`, ...) are not reported. A file caught mid-write is read once more; if it still cannot be parsed the usual error object is printed with a non-zero exit code.
+
 An account row also carries an additive `alias` field once one is set with `cswap alias` (e.g. `"alias": "dev"`); accounts without one simply omit the key.
 
 Weekly windows (`sevenDay` and per-model `scoped` entries — never `fiveHour`) additively carry pace fields once the week is ~a day old: `expectedPct` (where usage would sit if spread evenly across the week) and `aheadOfPace` (`true` when meaningfully above that — the same signal the human views show as an `(ahead)`/`(ahead of pace)` marker). `projectedExhaustionAt`/`willLastToReset` extrapolate the current rate into an ETA to 100% and a yes/no "will it last to the reset"; they stay `--json`-only since a linear projection is too rough to present as fact in the UI.
