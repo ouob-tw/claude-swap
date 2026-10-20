@@ -53,8 +53,29 @@ class Palette:
     sev_warn: str
     sev_crit: str
     track: str
+    # Bar glyphs and how a stale (old) measurement is marked. Dark keeps the
+    # thin line bar and ``dim``; the e-ink palette uses solid blocks and italic.
+    bar_filled: str = "━"
+    bar_half: str = "╸"
+    bar_empty: str = "─"
+    bar_tick: str = "┃"
+    stale_attr: str = "dim"
+    plain_bar: bool = False
 
     DARK: ClassVar["Palette"]
+    LIGHT: ClassVar["Palette"]
+
+    def stale(self, style: str) -> str:
+        """``style`` marked as a stale measurement."""
+        return f"{style} {self.stale_attr}".strip()
+
+    def bar_style(self, pct: float | None) -> str:
+        """Fill style for a usage bar. The e-ink palette keeps the bar plain
+        (a reversed fill would paint the blocks white); severity shows in the
+        percentage text instead."""
+        if self.plain_bar:
+            return self.foreground
+        return self.severity(pct)
 
     def severity(self, pct: float | None) -> str:
         if pct is None:
@@ -67,6 +88,8 @@ class Palette:
 
     @classmethod
     def from_theme(cls, theme: Theme) -> "Palette":
+        if theme.name == CSWAP_LIGHT.name:
+            return cls.LIGHT
         return cls(
             accent=theme.primary,
             foreground=theme.foreground,
@@ -101,44 +124,111 @@ CSWAP_DARK = Theme(
     },
 )
 
-# Light companion palette: neutral near-white surfaces for E-ink displays.
-ACCENT_LIGHT = "#954c2a"  # burnt sienna — deepened for AA on panel (worst-case row bg)
-FOREGROUND_LIGHT = "#111111"
-MUTED_LIGHT = "#444444"
-BACKGROUND_LIGHT = "#ffffff"
-SURFACE_LIGHT = "#f7f7f7"
-PANEL_LIGHT = "#e8e8e8"  # most-elevated = darkest (inverted from dark)
-SEV_OK_LIGHT = "#3d6b3d"  # forest green — deepened for AA on panel
-SEV_WARN_LIGHT = "#795911"  # deep ochre — deepened for AA on panel
-SEV_CRIT_LIGHT = "#ad3128"  # brick red — deepened for AA on panel
-TRACK_LIGHT = "#cccccc"
+# Light theme: pure black and white, no colour and no grey (e-ink style).
+# Severity is carried by text weight, not hue: normal text, bold for a warning,
+# reversed (white on black) for danger. Selected rows and cursors are reversed.
+BLACK = "#000000"
+WHITE = "#ffffff"
+
+
+def _eink_variables() -> dict[str, str]:
+    """Every Textual design token of the light theme pinned to black or white.
+
+    Textual derives dozens of tints (``$panel-lighten-1``, ``$text-muted``,
+    scrollbar shades, ...) by blending, which would introduce greys. Resolve
+    the full derived set once and force each name onto black or white."""
+    base = Theme(
+        name="cswap-light", primary=BLACK, secondary=BLACK, accent=BLACK,
+        foreground=BLACK, background=WHITE, surface=WHITE, panel=WHITE,
+        success=BLACK, warning=BLACK, error=BLACK, dark=False,
+    )
+    light_families = ("background", "surface", "panel")
+    out: dict[str, str] = {}
+    for name, value in base.to_color_system().generate().items():
+        family = name.split("-")[0]
+        if family in ("ansi", "boost") or name.startswith("footer-"):
+            continue
+        if not value.startswith(("#", "auto")):
+            continue  # text styles and keywords such as link-style: keep Textual's
+        out[name] = WHITE if family in light_families else BLACK
+    out.update({
+        "footer-background": WHITE,
+        "footer-foreground": BLACK,
+        "footer-key-foreground": BLACK,
+        "footer-key-background": WHITE,
+        "footer-description-foreground": BLACK,
+        "footer-description-background": WHITE,
+        "footer-item-background": WHITE,
+        "boost": "#00000000",
+        "boost-darken-1": "#00000000",
+        "boost-darken-2": "#00000000",
+        "boost-darken-3": "#00000000",
+        "boost-lighten-1": "#00000000",
+        "boost-lighten-2": "#00000000",
+        "boost-lighten-3": "#00000000",
+        # Selection and cursors are reversed: white on black.
+        "block-cursor-background": BLACK,
+        "block-cursor-foreground": WHITE,
+        "block-cursor-text-style": "none",
+        "block-cursor-blurred-background": BLACK,
+        "block-cursor-blurred-foreground": WHITE,
+        "block-cursor-blurred-text-style": "none",
+        "block-hover-background": BLACK,
+        "input-cursor-background": BLACK,
+        "input-cursor-foreground": WHITE,
+        "input-selection-background": BLACK,
+        "input-selection-foreground": WHITE,
+        "screen-selection-background": BLACK,
+        "screen-selection-foreground": WHITE,
+        "scrollbar-background": WHITE,
+        "scrollbar-background-hover": WHITE,
+        "scrollbar-background-active": WHITE,
+        "scrollbar-corner-color": WHITE,
+        "button-foreground": BLACK,
+        "button-color-foreground": BLACK,
+        "link-color": BLACK,
+        "link-color-hover": WHITE,
+        "link-background": WHITE,
+        "link-background-hover": BLACK,
+        "markdown-h1-background": WHITE,
+        "markdown-h2-background": WHITE,
+        "markdown-h3-background": WHITE,
+        "markdown-h4-background": WHITE,
+        "markdown-h5-background": WHITE,
+        "markdown-h6-background": WHITE,
+        "border": BLACK,
+        "border-blurred": BLACK,
+        "track": BLACK,
+    })
+    return out
+
 
 CSWAP_LIGHT = Theme(
     name="cswap-light",
-    primary=ACCENT_LIGHT,
-    secondary=MUTED_LIGHT,
-    accent=ACCENT_LIGHT,
-    foreground=FOREGROUND_LIGHT,
-    background=BACKGROUND_LIGHT,
-    surface=SURFACE_LIGHT,
-    panel=PANEL_LIGHT,
-    success=SEV_OK_LIGHT,
-    warning=SEV_WARN_LIGHT,
-    error=SEV_CRIT_LIGHT,
+    primary=BLACK,
+    secondary=BLACK,
+    accent=BLACK,
+    foreground=BLACK,
+    background=WHITE,
+    surface=WHITE,
+    panel=WHITE,
+    success=BLACK,
+    warning=BLACK,
+    error=BLACK,
     dark=False,
-    variables={
-        "footer-key-foreground": ACCENT_LIGHT,
-        "block-cursor-background": PANEL_LIGHT,
-        "block-cursor-foreground": FOREGROUND_LIGHT,
-        "block-cursor-text-style": "none",
-        "block-cursor-blurred-background": PANEL_LIGHT,
-        "block-cursor-blurred-foreground": FOREGROUND_LIGHT,
-        "block-hover-background": PANEL_LIGHT,
-        "track": TRACK_LIGHT,
-    },
+    variables=_eink_variables(),
 )
 
 Palette.DARK = Palette(
     accent=ACCENT, foreground=FOREGROUND, muted=MUTED,
     sev_ok=SEV_OK, sev_warn=SEV_WARN, sev_crit=SEV_CRIT, track=TRACK,
+)
+
+# Empty style = inherit the widget's colours, so text flips to white-on-black
+# automatically inside a reversed (selected) row.
+Palette.LIGHT = Palette(
+    accent="", foreground="", muted="",
+    sev_ok="", sev_warn="bold", sev_crit="reverse", track="",
+    bar_filled="█", bar_half="▌", bar_empty="─", bar_tick="┃",
+    stale_attr="italic", plain_bar=True,
 )

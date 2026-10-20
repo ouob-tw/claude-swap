@@ -38,8 +38,8 @@ Screen {
 #sessions-help:light:hover, #sessions-help:light:focus,
 SessionInfoModal:light .modal-buttons Button:hover,
 SessionInfoModal:light .modal-buttons Button:focus {
-    background: $panel;
-    color: $foreground;
+    background: $foreground;
+    color: $background;
 }
 
 /* -- accounts panel (the always-visible monitor) --------------------------- */
@@ -243,4 +243,83 @@ SessionInfoModal .modal-buttons, SessionInfoModal .modal-hint { margin-top: 0; }
 
 AddTokenModal Input {
     margin-bottom: 1;
+}
+
+/* -- light theme: pure black / white (e-ink) ----------------------------------
+   No greys: selection and focus are reversed, the modal backdrop is opaque
+   (a translucent one would blend black text into grey), and DataTable's
+   zebra/header tints are flattened to the plain background. */
+
+#menu ListItem.-highlight:light,
+#menu:focus ListItem.-highlight:light,
+#accounts ListItem.-highlight:light,
+#accounts:focus ListItem.-highlight:light,
+#accounts ListItem.flash:light {
+    color: $background;
+    background: $foreground;
+}
+
+MenuItem.-highlight Static:light,
+MenuItem.-highlight Static.menu-item-muted:light,
+#accounts ListItem.-highlight AccountCard:light,
+#accounts ListItem.flash AccountCard:light {
+    color: $background;
+}
+
+ConfirmModal:light, AddTokenModal:light, OutputModal:light, SessionInfoModal:light {
+    background: $background;
+}
+
+.modal-buttons Button:light {
+    text-style: underline;
+}
+
+.modal-buttons Button:light:hover {
+    background: $foreground;
+    color: $background;
+}
+
+.modal-buttons Button:light:focus {
+    background: $foreground;
+    color: $background;
+    text-style: bold;
+}
+
+DataTable:light > .datatable--odd-row,
+DataTable:light > .datatable--even-row,
+DataTable:light > .datatable--header,
+DataTable:light > .datatable--header-hover {
+    background: $background;
+    color: $foreground;
+}
+
+DataTable:light > .datatable--header {
+    text-style: bold;
+}
+
+DataTable:light > .datatable--cursor,
+DataTable:light > .datatable--hover,
+DataTable:light > .datatable--header-cursor,
+DataTable:light > .datatable--fixed-cursor {
+    background: $foreground;
+    color: $background;
+}
+
+#mode-badge.dry:light {
+    background: $background;
+    color: $foreground;
+    text-style: bold;
+}
+
+.form-error:light {
+    text-style: reverse;
+}
+
+#accounts-panel:light { border-bottom: solid $foreground; }
+#event-log:light { border-top: solid $foreground; }
+.modal-box:light { border: round $foreground; }
+
+/* Textual tints focused widgets by 5% of the foreground: grey on white. */
+*:focus:light {
+    background-tint: $foreground 0%;
 }

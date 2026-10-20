@@ -1,6 +1,8 @@
 """Tests for the Palette value object and the light/dark themes."""
 from __future__ import annotations
 
+import pytest
+
 from claude_swap.tui import theme
 from claude_swap.tui.theme import CSWAP_DARK, CSWAP_LIGHT, Palette
 
@@ -19,10 +21,11 @@ def test_dark_palette_matches_constants():
 
 
 def test_from_theme_reads_theme_object_including_track():
-    p = Palette.from_theme(CSWAP_LIGHT)
-    assert p.accent == theme.ACCENT_LIGHT
-    assert p.sev_crit == theme.SEV_CRIT_LIGHT
-    assert p.track == theme.TRACK_LIGHT  # from Theme.variables["track"], not app cache
+    p = Palette.from_theme(CSWAP_DARK)
+    assert p.accent == theme.ACCENT
+    assert p.sev_crit == theme.SEV_CRIT
+    assert p.track == theme.TRACK  # from Theme.variables["track"], not app cache
+    assert Palette.from_theme(CSWAP_LIGHT) is Palette.LIGHT
 
 
 def test_severity_ramp_and_none():
@@ -35,7 +38,7 @@ def test_severity_ramp_and_none():
 
 def test_both_themes_expose_track_variable():
     assert CSWAP_DARK.variables["track"] == theme.TRACK
-    assert CSWAP_LIGHT.variables["track"] == theme.TRACK_LIGHT
+    assert CSWAP_LIGHT.variables["track"] == theme.BLACK
     assert CSWAP_LIGHT.dark is False
 
 
@@ -48,20 +51,7 @@ def _contrast(hex_a: str, hex_b: str) -> float:
     return (lb + 0.05) / (la + 0.05)
 
 
-def test_light_text_meets_AA_on_all_backgrounds():
-    # Accent and severity colors render as PERCENTAGE TEXT on highlighted
-    # ($surface) and flash ($panel) rows, not just the base background — so
-    # every text color must clear the 4.5:1 text bar against all three.
-    from claude_swap.tui import theme
-    text_colors = (
-        theme.FOREGROUND_LIGHT,
-        theme.MUTED_LIGHT,
-        theme.ACCENT_LIGHT,
-        theme.SEV_OK_LIGHT,
-        theme.SEV_WARN_LIGHT,
-        theme.SEV_CRIT_LIGHT,
-    )
-    backgrounds = (theme.BACKGROUND_LIGHT, theme.SURFACE_LIGHT, theme.PANEL_LIGHT)
-    for color in text_colors:
-        for bg in backgrounds:
-            assert _contrast(color, bg) >= 4.5, f"{color} on {bg}"
+def test_light_text_contrast_is_maximal():
+    # Pure black on pure white: the only text/background pair the e-ink
+    # theme uses (a reversed row swaps them), so contrast is the 21:1 ceiling.
+    assert _contrast(theme.BLACK, theme.WHITE) == pytest.approx(21.0)

@@ -110,17 +110,17 @@ class TestThemePalette:
         monkeypatch.setenv("FORCE_COLOR", "1")
         printer._colors_enabled = None
         printer.set_theme("light")
-        assert "38;2;149;76;42" in printer.accent("x")   # #954c2a
+        assert printer.accent("x") == "x"   # e-ink: no colour
         printer.set_theme("dark")
         assert "38;5;173" in printer.accent("x")
 
-    def test_light_theme_error_uses_light_red(self, monkeypatch, capsys):
+    def test_light_theme_error_is_reversed(self, monkeypatch, capsys):
         monkeypatch.delenv("NO_COLOR", raising=False)
         monkeypatch.setenv("FORCE_COLOR", "1")
         printer._colors_enabled = None
         printer.set_theme("light")
         printer.error("boom")
-        assert "38;2;173;49;40" in capsys.readouterr().err   # #ad3128
+        assert "\033[7m" in capsys.readouterr().err
 
     def test_unknown_theme_falls_back_to_dark(self, monkeypatch):
         monkeypatch.delenv("NO_COLOR", raising=False)

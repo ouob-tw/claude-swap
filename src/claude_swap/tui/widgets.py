@@ -25,11 +25,6 @@ from claude_swap.tui.theme import Palette
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
 
-_BAR_FILLED = "━"
-_BAR_HALF = "╸"
-_BAR_EMPTY = "─"
-_BAR_TICK = "┃"
-
 
 def bar_cells(
     pct: float | None,
@@ -42,7 +37,7 @@ def bar_cells(
     """Just the bar glyphs: severity-colored fill, track, optional tick."""
     text = Text()
     if pct is None:
-        text.append(_BAR_EMPTY * width, style=palette.track)
+        text.append(palette.bar_empty * width, style=palette.track)
         return text
     frac = min(max(pct, 0.0), 100.0) / 100.0
     cells = frac * width
@@ -51,17 +46,17 @@ def bar_cells(
     tick_at: int | None = None
     if threshold is not None:
         tick_at = min(width - 1, max(0, round(threshold / 100.0 * width)))
-    color = palette.severity(pct)
-    fill_style = f"{color} dim" if stale else color
+    color = palette.bar_style(pct)
+    fill_style = palette.stale(color) if stale else color
     for i in range(width):
         if tick_at is not None and i == tick_at:
-            text.append(_BAR_TICK, style=palette.sev_warn)
+            text.append(palette.bar_tick, style=palette.sev_warn)
         elif i < full:
-            text.append(_BAR_FILLED, style=fill_style)
+            text.append(palette.bar_filled, style=fill_style)
         elif i == full and half:
-            text.append(_BAR_HALF, style=fill_style)
+            text.append(palette.bar_half, style=fill_style)
         else:
-            text.append(_BAR_EMPTY, style=palette.track)
+            text.append(palette.bar_empty, style=palette.track)
     return text
 
 
@@ -83,7 +78,7 @@ def usage_bar(
         text.append("  usage unknown", style=palette.muted)
     else:
         color = palette.severity(pct)
-        text.append(f" {pct:3.0f}%", style=f"{color} dim" if stale else color)
+        text.append(f" {pct:3.0f}%", style=palette.stale(color) if stale else color)
     if suffix:
         text.append(f"  {suffix}", style=palette.muted)
     return text
@@ -281,7 +276,7 @@ def mini_account_text(
             text.append(" · ", style=palette.track)
         color = palette.severity(pct)
         text.append(f"{label} ", style=palette.muted)
-        text.append(f"{pct:.0f}%", style=f"{color} dim" if stale else color)
+        text.append(f"{pct:.0f}%", style=palette.stale(color) if stale else color)
         if pct >= 100:
             reset = data.reset_text(window, now)
             if reset:

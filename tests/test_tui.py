@@ -344,13 +344,15 @@ class TestFormatting:
         assert "last seen" not in api_key
 
     def test_account_card_uses_light_palette_when_passed(self):
-        from claude_swap.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
+        from claude_swap.tui.theme import CSWAP_LIGHT, Palette
         from claude_swap.tui.widgets import account_card_text
 
         acc = make_account(1, active=True, entry=make_entry(pct5=95.0))
         text = account_card_text(acc, 100, palette=Palette.from_theme(CSWAP_LIGHT))
-        styles = {str(span.style) for span in text.spans}
-        assert any(ACCENT_LIGHT in s for s in styles)  # active marker uses light accent
+        styles = {str(span.style).strip() for span in text.spans}
+        assert "bold" in styles  # active marker is bold, uncoloured
+        assert "reverse" in styles  # 95% is danger: reversed
+        assert not any("#" in s for s in styles)
 
     def test_window_helpers(self):
         entry = make_entry(pct5=47.0)
@@ -1659,9 +1661,9 @@ class TestEventText:
 
         assert event.human() in event_text(event).plain
 
-    def test_event_text_uses_light_accent_for_switch(self):
+    def test_event_text_is_uncoloured_for_switch_in_light(self):
         from claude_swap.tui.autoview import event_text
-        from claude_swap.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
+        from claude_swap.tui.theme import CSWAP_LIGHT, Palette
 
         event = SwitchEvent(
             trigger="proactive",
@@ -1669,7 +1671,7 @@ class TestEventText:
             to_ref={"number": 2, "email": "b@x.com"},
         )
         text = event_text(event, palette=Palette.from_theme(CSWAP_LIGHT))
-        assert any(ACCENT_LIGHT in str(s.style) for s in text.spans)
+        assert not any("#" in str(s.style) for s in text.spans)
 
 
 # ---------------------------------------------------------------------------

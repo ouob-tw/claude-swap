@@ -62,7 +62,7 @@ def test_a_test_may_latch_the_theme(monkeypatch):
     monkeypatch.setenv("FORCE_COLOR", "1")
     printer._colors_enabled = None
     printer.set_theme("light")
-    assert "38;2;149;76;42" in printer.accent("x")   # premise: light is live
+    assert printer.accent("x") == "x"   # premise: light (plain e-ink) is live
 
 
 def test_the_next_test_is_not_themed_by_it(monkeypatch):

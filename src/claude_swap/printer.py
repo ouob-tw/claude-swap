@@ -17,6 +17,7 @@ from pathlib import Path
 _RESET = "\033[0m"
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
+_REVERSE = "\033[7m"
 
 _PALETTES: dict[str, dict[str, str]] = {
     "dark": {
@@ -24,12 +25,16 @@ _PALETTES: dict[str, dict[str, str]] = {
         "muted": "\033[38;5;250m",  # soft gray -- readable, but quieter than normal
         "red": "\033[31m",
         "yellow": "\033[33m",
+        "dim": _DIM,
     },
+    # E-ink style: no colour, no grey, no dim. Warnings are bold and errors
+    # reversed (white on black); everything else is plain.
     "light": {
-        "accent": "\033[38;2;149;76;42m",  # #954c2a burnt sienna
-        "muted": "\033[38;2;99;93;85m",  # #635d55
-        "red": "\033[38;2;173;49;40m",  # #ad3128
-        "yellow": "\033[38;2;121;89;17m",  # #795911 deep ochre
+        "accent": "",
+        "muted": "",
+        "red": _REVERSE,
+        "yellow": _BOLD,
+        "dim": "",
     },
 }
 
@@ -129,6 +134,8 @@ def _style(text: str, *codes: str) -> str:
     if not colors_enabled():
         return text
     prefix = "".join(codes)
+    if not prefix:
+        return text
     return f"{prefix}{text}{_RESET}"
 
 
@@ -147,7 +154,7 @@ def muted(text: str) -> str:
 
 def dimmed(text: str) -> str:
     """Dim for tertiary info -- tree connectors, hints."""
-    return _style(text, _DIM)
+    return _style(text, _pal("dim"))
 
 
 def bolded(text: str) -> str:
