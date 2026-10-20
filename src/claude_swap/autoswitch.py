@@ -1452,7 +1452,12 @@ class AutoSwitchEngine:
             # Highest weekly quota burn rate first. On a rate tie, keep the
             # active account; otherwise prefer the earlier weekly reset.
             burn_rate = (100 - weekly) / ((reset - now) / 3600)
-            ranked.append(((-burn_rate, num != current, reset), num))
+            key = (
+                self._small_plan_key(num, weekly, reset, now, current)
+                if self.settings.strategy == "small-plan-first"
+                else (-burn_rate, num != current, reset)
+            )
+            ranked.append((key, num))
         ranked.sort()
         if not ranked or ranked[0][1] == current:
             self._emit(NoSwitchEvent(reason="idle-already-best"))
@@ -1845,6 +1850,28 @@ class AutoSwitchEngine:
             < was - RECOVERY_HYSTERESIS_S
         )
 
+    def _small_plan_key(
+        self, num: str, weekly: float, reset: float, now: float, current: str,
+    ) -> tuple:
+        """Share plan grouping and tie rules across escape and idle selection."""
+        hours = (reset - now) / 3600
+        remaining = 100 - weekly
+        multiplier = self.switcher.account_plan_multiplier(num)
+        exception = (
+            multiplier > 1
+            and hours < self.settings.big_plan_reset_hours
+            and remaining >= self.settings.big_plan_min_remaining_pct
+        )
+        # Exception plans compete only on burn rate, regardless of their size.
+        return (
+            0 if exception else 1,
+            0 if exception else multiplier,
+            -remaining / hours,
+            num != current,
+            reset,
+            int(num),
+        )
+
     def _rank_candidates(
         self,
         *,
@@ -1866,7 +1893,7 @@ class AutoSwitchEngine:
         twice per tick: on the stored snapshot to decide provisionally, then
         on the escalated refetch to re-verify before switching.
         """
-        weekly_reset = settings.strategy == "weekly-reset"
+        weekly_reset = settings.strategy in ("weekly-reset", "small-plan-first")
         # consume-first ranks by soonest weekly reset; a proactive (below-
         # threshold) target must reset strictly sooner than where we are.
         active_reset_ts = (
@@ -2062,6 +2089,8 @@ class AutoSwitchEngine:
                 key: tuple = (
                     (0, recovery_ts, -h) if by_recovery else (1, -h, recovery_ts)
                 )
+            elif settings.strategy == "small-plan-first":
+                key = self._small_plan_key(num, weekly, reset_ts, now, current)
             elif weekly_reset:
                 # Threshold-triggered selection shares idle preparation's
                 # weekly ordering, without moving a healthy busy session.

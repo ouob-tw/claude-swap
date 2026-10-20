@@ -7345,3 +7345,169 @@ class TestFreshenRoutesThroughGate:
         assert verdict == "ok"
         assert gate_calls["args"][0] == "2"
         assert "called" not in direct, "freshen must not POST outside the gate"
+
+
+class TestSmallPlanFirst:
+    """Engine ticks with fake usage/clock and isolated credentials; no provider proof."""
+
+    def setup_plans(self, h, plans=("max_5x", "pro", "max_20x"), **settings):
+        h.engine.settings = replace(
+            h.settings, strategy="small-plan-first", threshold=94,
+            seven_day_threshold=99, target_five_hour_max_pct=94,
+            unhealthy_ticks=1, **settings,
+        )
+        data = h.switcher._get_sequence_data()
+        for num, plan in enumerate(plans, 1):
+            data["accounts"][str(num)]["plan"] = {"id": plan, "observedAt": None}
+        h.switcher._write_json(h.switcher.sequence_file, data)
+
+    def usage(self, h, rows):
+        return {
+            str(num): {"five_hour": {"pct": five}, "seven_day": {
+                "pct": weekly, "resets_at": _iso_at(h.clock() + hours * 3600),
+            }}
+            for num, (five, weekly, hours) in enumerate(rows, 1)
+        }
+
+    def test_small_plan_beats_higher_burn_rate(self, harness):
+        self.setup_plans(harness)
+        usage = self.usage(harness, [(94, 86, 33), (10, 38, 41), (10, 0, 25)])
+        assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert harness.active_number() == 2
+
+    @pytest.mark.parametrize("active, trigger", [(94, "proactive"), (100, "at-limit"), (None, "failover")])
+    @pytest.mark.parametrize("peer_five, peer_week, expected", [(10, 38, 2), (94, 38, 3), (10, 99, 3)])
+    def test_threshold_and_escape_eligibility(self, harness, active, trigger, peer_five, peer_week, expected):
+        self.setup_plans(harness, ("pro", "pro", "max_5x"))
+        usage = self.usage(harness, [(active, 86, 33), (peer_five, peer_week, 41), (10, 26, 62)])
+        if active is None:
+            usage["1"] = None
+        assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert harness.active_number() == expected
+        assert next(e for e in harness.events if isinstance(e, SwitchEvent)).trigger == trigger
+
+    def test_incident_replay_same_plan_burn_rate(self, harness):
+        self.setup_plans(harness, ("max_5x", "pro", "pro"))
+        usage = self.usage(harness, [(94, 86, 33), (10, 38, 41), (10, 26, 62)])
+        assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert harness.active_number() == 2
+
+    @pytest.mark.parametrize("plan", ["unknown", "team"])
+    def test_unknown_plan_is_small(self, harness, plan):
+        self.setup_plans(harness, ("max_5x", plan, "max_20x"))
+        usage = self.usage(harness, [(94, 86, 33), (10, 38, 41), (10, 0, 25)])
+        assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert harness.active_number() == 2
+
+    @pytest.mark.parametrize("hours, remaining, expected", [
+        (23.9, 20, 3), (24, 20, 2), (23.9, 19.9, 2),
+    ])
+    def test_exception_boundaries(self, harness, hours, remaining, expected):
+        self.setup_plans(harness)
+        usage = self.usage(harness, [(94, 86, 33), (10, 0, 100), (10, 100 - remaining, hours)])
+        assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert harness.active_number() == expected
+
+    def test_two_exceptions_ignore_multiplier(self, harness):
+        self.setup_plans(harness, ("pro", "max_5x", "max_20x"))
+        usage = self.usage(harness, [(94, 86, 33), (10, 80, 20), (10, 20, 4)])
+        assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+
+    @pytest.mark.parametrize("hours, remaining, reset_setting, remaining_setting, expected", [
+        (30, 20, 31, 20, 3), (23, 20, 23, 20, 2),
+        (23, 10, 24, 10, 3), (23, 20, 24, 21, 2),
+    ])
+    def test_configured_exception(self, harness, hours, remaining, reset_setting, remaining_setting, expected):
+        self.setup_plans(harness, big_plan_reset_hours=reset_setting,
+                         big_plan_min_remaining_pct=remaining_setting)
+        usage = self.usage(harness, [(94, 86, 33), (10, 0, 100), (10, 100 - remaining, hours)])
+        assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert harness.active_number() == expected
+
+    @pytest.mark.parametrize("plans, rows, expected", [
+        (("max_5x", "pro", "max_20x"), [(10, 10, 100), (10, 90, 100), (10, 0, 25)], 2),
+        (("pro", "pro", "pro"), [(10, 60, 40), (10, 80, 20), (10, 90, 100)], 1),
+        (("max_20x", "max_5x", "pro"), [(10, 60, 20), (10, 80, 10), (10, 0, 25)], 1),
+        (("max_5x", "max_20x", "pro"), [(10, 80, 20), (10, 20, 4), (10, 0, 25)], 2),
+    ])
+    def test_idle_order_and_current_account_ties(self, harness, plans, rows, expected):
+        self.setup_plans(harness, plans, idle_rebalance=True)
+        # The engine observes the active plan from live credentials each tick.
+        live = harness.temp_home / ".claude" / ".credentials.json"
+        creds = json.loads(live.read_text())
+        creds["claudeAiOauth"].update(subscriptionType="pro", rateLimitTier=plans[0])
+        live.write_text(json.dumps(creds))
+        with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")):
+            outcome = harness.tick_with_usage(self.usage(harness, rows))
+        assert outcome is (TickOutcome.NO_ACTION if expected == 1 else TickOutcome.SWITCHED)
+        assert harness.active_number() == expected
+        if expected == 1:
+            assert any(isinstance(e, NoSwitchEvent) and e.reason == "idle-already-best" for e in harness.events)
+
+    @pytest.mark.parametrize("plans, peer2, peer3, expected", [
+        (("pro", "pro", "pro"), (10, 60, 40), (10, 80, 20), 3),
+        (("pro", "max_5x", "max_20x"), (10, 60, 20), (10, 80, 10), 3),
+        (("pro", "pro", "pro"), (10, 60, 40), (10, 60, 40), 2),
+    ])
+    def test_reset_then_account_number_break_ties(self, harness, plans, peer2, peer3, expected):
+        self.setup_plans(harness, plans)
+        data = harness.switcher._get_sequence_data()
+        data["sequence"] = [1, 3, 2]  # Numeric slot, not list traversal, breaks the final tie.
+        harness.switcher._write_json(harness.switcher.sequence_file, data)
+        assert harness.tick_with_usage(self.usage(harness, [(94, 86, 33), peer2, peer3])) is TickOutcome.SWITCHED
+        assert harness.active_number() == expected
+
+    @pytest.mark.parametrize("weekly_threshold", [None, 99])
+    def test_all_above_has_no_recovery_escape(self, harness, weekly_threshold):
+        self.setup_plans(harness)
+        harness.engine.settings = replace(harness.engine.settings, seven_day_threshold=weekly_threshold,
+                                          target_five_hour_max_pct=100)
+        usage = self.usage(harness, [(94, 86, 33), (95, 38, 41), (96, 26, 62)])
+        for num, hours in [("1", 100), ("2", 0.1), ("3", 0.2)]:
+            usage[num]["five_hour"]["resets_at"] = _iso_at(harness.clock() + hours * 3600)
+        assert harness.tick_with_usage(usage) is TickOutcome.BLOCKED
+        assert harness.active_number() == 1
+        assert any(isinstance(e, NoSwitchEvent) and e.reason == "no-qualifying-candidate" for e in harness.events)
+
+    def test_busy_below_threshold_does_not_switch(self, harness):
+        self.setup_plans(harness, idle_rebalance=True)
+        with patch.object(harness.engine, "_idle_ready", return_value=(False, "busy")):
+            assert harness.tick_with_usage(self.usage(harness, [(10, 86, 33), (10, 38, 41), (10, 26, 62)])) is TickOutcome.NO_ACTION
+        assert harness.active_number() == 1
+
+    def test_weekly_threshold_triggers(self, harness):
+        self.setup_plans(harness)
+        assert harness.tick_with_usage(self.usage(harness, [(10, 99, 33), (10, 38, 41), (10, 26, 62)])) is TickOutcome.SWITCHED
+        assert harness.active_number() == 2
+
+    def test_max_5x_precedes_max_20x_in_normal_group(self, harness):
+        self.setup_plans(harness, ("pro", "max_5x", "max_20x"))
+        assert harness.tick_with_usage(self.usage(harness, [(94, 86, 33), (10, 90, 100), (10, 0, 25)])) is TickOutcome.SWITCHED
+        assert harness.active_number() == 2
+
+    @pytest.mark.parametrize("idle", [False, True])
+    def test_cooldown_still_blocks(self, harness, idle):
+        self.setup_plans(harness, idle_rebalance=idle)
+        harness.engine._mutate_state(lambda state: state.update(lastSwitchAt=harness.clock() - 10))
+        with patch.object(harness.engine, "_idle_ready", return_value=(True, "cold")):
+            outcome = harness.tick_with_usage(self.usage(harness, [(10 if idle else 94, 86, 33), (10, 38, 41), (10, 26, 62)]))
+        assert outcome is TickOutcome.NO_ACTION
+        assert harness.active_number() == 1
+        assert any(isinstance(e, NoSwitchEvent) and e.reason == "cooldown" for e in harness.events)
+
+    def test_no_return_excludes_smallest_candidate(self, harness):
+        self.setup_plans(harness)
+        harness.engine._mutate_state(lambda state: state.update(
+            lastSwitchFrom="2", lastSwitchTo="1", lastSwitchAt=harness.clock() - 600,
+            leftHeadroom=10, leftRecoveryAt=harness.clock() + 41 * 3600, leftTrigger="proactive",
+        ))
+        assert harness.tick_with_usage(self.usage(harness, [(94, 86, 33), (10, 90, 41), (10, 26, 62)])) is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+
+    @pytest.mark.parametrize("bad_weekly", [None, -1, 101, True])
+    def test_unreadable_small_plan_does_not_beat_valid_peer(self, harness, bad_weekly):
+        self.setup_plans(harness)
+        usage = self.usage(harness, [(94, 86, 33), (10, bad_weekly, 41), (10, 26, 62)])
+        assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert harness.active_number() == 3

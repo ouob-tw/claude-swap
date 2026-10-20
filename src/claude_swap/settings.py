@@ -53,7 +53,9 @@ class AutoSwitchSettings:
     interval_seconds: float = 60.0
     cooldown_seconds: float = 300.0
     hysteresis_pct: float = 10.0
-    strategy: str = "best"  # best, proactive consume-first, or threshold-triggered weekly-reset
+    strategy: str = "best"  # best, consume-first, weekly-reset, or small-plan-first
+    big_plan_reset_hours: float = 24.0
+    big_plan_min_remaining_pct: float = 20.0
     include_api_key_accounts: bool = False
     unhealthy_ticks: int = 3
     # Comma-separated model display name(s) (e.g. "Fable" or "Fable,Opus"),
@@ -138,8 +140,16 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "strategy", "strategy", "choice",
-            choices=("best", "consume-first", "weekly-reset"),
+            choices=("best", "consume-first", "weekly-reset", "small-plan-first"),
             help="How auto-switch picks the target account",
+        ),
+        SettingSpec(
+            "autoswitch", "bigPlanResetHours", "big_plan_reset_hours", "float", 1.0, 168.0,
+            help="Prioritize larger plans resetting within this many hours",
+        ),
+        SettingSpec(
+            "autoswitch", "bigPlanMinRemainingPct", "big_plan_min_remaining_pct", "float", 0.0, 100.0,
+            help="Minimum weekly quota remaining for the larger-plan exception",
         ),
         SettingSpec(
             "autoswitch", "includeApiKeyAccounts", "include_api_key_accounts", "bool",

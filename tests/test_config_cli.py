@@ -54,7 +54,7 @@ class TestConfigList:
             "ui.theme",
         ):
             assert key in out
-        assert out.count("(default)") == 12
+        assert out.count("(default)") == 14
 
     def test_set_key_not_marked_default(self, temp_home, capsys):
         _run(["set", "autoswitch.cooldownSeconds", "600"], capsys)
@@ -81,7 +81,7 @@ class TestConfigList:
         assert payload["schemaVersion"] == 1
         assert payload["path"].endswith("settings.json")
         by_key = {entry["key"]: entry for entry in payload["settings"]}
-        assert len(by_key) == 12
+        assert len(by_key) == 14
         assert by_key["autoswitch.sevenDayThreshold"]["value"] is None
         assert by_key["autoswitch.targetFiveHourMaxPct"]["value"] == 100.0
         assert by_key["autoswitch.threshold"]["value"] == 90.0
@@ -273,3 +273,39 @@ class TestConfigMisc:
             with pytest.raises(SystemExit):
                 cli.main()
         assert captured["settings"].threshold == 77.0
+
+
+class TestSmallPlanSettings:
+    def test_defaults_and_strategy_round_trip(self, temp_home, capsys):
+        code, out, _ = _run(["--json"], capsys)
+        assert code == 0
+        values = {row["key"]: row["value"] for row in json.loads(out)["settings"]}
+        assert values["autoswitch.bigPlanResetHours"] == 24
+        assert values["autoswitch.bigPlanMinRemainingPct"] == 20
+        assert _run(["set", "autoswitch.strategy", "small-plan-first"], capsys)[0] == 0
+        assert _run(["get", "autoswitch.strategy"], capsys)[1].strip() == "small-plan-first"
+        code, out, _ = _run([], capsys)
+        assert code == 0
+        assert "autoswitch.bigPlanResetHours" in out
+        assert "autoswitch.bigPlanMinRemainingPct" in out
+
+    @pytest.mark.parametrize("key,value", [
+        ("bigPlanResetHours", "1"), ("bigPlanResetHours", "168"),
+        ("bigPlanResetHours", "23.9"),
+        ("bigPlanMinRemainingPct", "0"), ("bigPlanMinRemainingPct", "100"),
+        ("bigPlanMinRemainingPct", "19.9"),
+    ])
+    def test_valid_values_persist(self, temp_home, capsys, key, value):
+        assert _run(["set", f"autoswitch.{key}", value], capsys)[0] == 0
+        code, out, _ = _run(["get", f"autoswitch.{key}"], capsys)
+        assert code == 0
+        assert float(out.strip()) == float(value)
+
+    @pytest.mark.parametrize("key,value", [
+        ("bigPlanResetHours", "0.9"), ("bigPlanResetHours", "168.1"),
+        ("bigPlanMinRemainingPct", "-0.1"), ("bigPlanMinRemainingPct", "100.1"),
+        ("bigPlanResetHours", "nan"), ("bigPlanMinRemainingPct", "inf"),
+        ("bigPlanResetHours", "invalid"),
+    ])
+    def test_invalid_values_rejected(self, temp_home, capsys, key, value):
+        assert _run(["set", f"autoswitch.{key}", value], capsys)[0] != 0
