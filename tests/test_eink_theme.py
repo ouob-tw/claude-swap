@@ -263,6 +263,49 @@ class TestRenderedLightTui:
             await settle(pilot)
             _assert_eink(app, "confirm-modal")
 
+    async def test_focused_table_toasts_and_invalid_input(self, tmp_path):
+        from textual.widgets import DataTable
+
+        app = self._app(tmp_path)
+        async with app.run_test(size=(100, 40), notifications=True) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "sessions")
+            await settle(pilot)
+            app.screen.query_one(DataTable).focus()
+            await pilot.pause()
+            _assert_eink(app, "sessions-table-focused")
+            for sev in ("information", "warning", "error"):
+                app.notify(f"{sev} message", severity=sev)
+            await pilot.pause(0.3)
+            from textual.widgets._toast import Toast
+
+            await pilot.pause(0.5)
+            assert len(app.screen.query(Toast)) == 3
+            _assert_eink(app, "toasts")
+            await pilot.press("escape")
+            await pilot.pause()
+            await menu_select(pilot, "add-menu")
+            await menu_select(pilot, "add-token")
+            await settle(pilot)
+            from textual.widgets import Input
+
+            from claude_swap.tui.modals import AddTokenModal
+
+            assert isinstance(app.screen, AddTokenModal)
+            inp = app.screen.query_one("#slot", Input)
+            inp.value = "not-a-number"
+            inp.focus()
+            await pilot.pause()
+            await pilot.press("tab")  # blur: unfocused invalid border
+            await pilot.pause()
+            assert inp.has_class("-invalid")
+            _assert_eink(app, "invalid-input")
+            from textual.widgets import Button
+
+            app.screen.query(Button).first().add_class("-active")
+            await pilot.pause()
+            _assert_eink(app, "button-active")
+
     async def test_auto_screen(self, tmp_path, fake_engine):  # noqa: F811
         app = self._app(tmp_path)
         async with app.run_test(size=(100, 40)) as pilot:
@@ -271,11 +314,25 @@ class TestRenderedLightTui:
             await settle(pilot)
             _assert_eink(app, "auto")
 
-    async def test_dark_screen_keeps_colour(self, tmp_path):
-        accounts = [make_account(1, active=True, entry=make_entry(pct5=95.0))]
+    async def test_dark_screens_keep_pre_eink_colours(self, tmp_path):
+        """Colour sets captured from the dark TUI before the e-ink change."""
+        accounts = [
+            make_account(1, active=True, entry=make_entry(pct5=95.0, pct7=75.0)),
+            make_account(2, entry=make_entry(pct5=50.0, age_s=900.0)),
+            make_account(3, entry=make_entry(pct5=20.0)),
+        ]
         app = make_app(FakeSwitcher(accounts, tmp_path))
+        expected = {
+            "#141414", "#1e1e1e", "#262626", "#3a3a3a", "#5f7a5f", "#87af87",
+            "#8a8a8a", "#d6875f", "#d75f5f", "#d7875f", "#d7af5f", "#e8e4de",
+        }
         async with app.run_test(size=(100, 40)) as pilot:
             await settle(pilot)
             assert app.theme == "cswap-dark"
+            colours, dim, _inv = _scan(app)
+            assert colours == expected
+            assert not dim  # dashboard bars are fresh here
+            await menu_select(pilot, "switch")
+            await settle(pilot)
             colours, _dim, _inv = _scan(app)
-            assert "#d75f5f" in colours  # severity red still used in dark
+            assert colours == expected

@@ -323,3 +323,28 @@ DataTable:light > .datatable--fixed-cursor {
 *:focus:light {
     background-tint: $foreground 0%;
 }
+
+DataTable:focus:light > .datatable--header,
+DataTable:focus:light > .datatable--header-hover {
+    background-tint: $foreground 0%;
+}
+
+/* Invalid input borders default to a 60% blend of the error colour. */
+Input.-invalid:light, Input.-invalid:focus:light {
+    border: tall $foreground;
+}
+
+/* Notifications: error and warning share a colour here, so mark by weight. */
+Toast:light {
+    background: $background;
+    color: $foreground;
+}
+Toast.-warning:light { text-style: bold; }
+Toast.-error:light { text-style: reverse; }
+
+/* A pressed button is tinted by 30% of the background: grey. */
+Button.-active:light {
+    tint: $background 0%;
+    background: $foreground;
+    color: $background;
+}
