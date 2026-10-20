@@ -378,6 +378,12 @@ class ClaudeAccountSwitcher:
         self._probe_verdicts: dict[
             tuple[str, str, str, str, str, str], bool
         ] = {}
+        # Plan observation's own ownership verdicts, keyed like
+        # _probe_verdicts but kept apart from them: they only gate reading a
+        # login's plan, never the backup/switch provenance decisions.
+        self._plan_owner_verdicts: dict[
+            tuple[str, str, str, str, str, str], bool
+        ] = {}
 
         # Run any pending one-time data migrations (e.g. relocating Windows
         # backup credentials out of Credential Manager into files). Imported
@@ -1992,20 +1998,74 @@ class ClaudeAccountSwitcher:
         """Quota multiplier of a slot's plan relative to Pro; 1 when unknown."""
         return self.account_plan(account_num)["multiplier"]
 
+    def _plan_owner_confirmed(
+        self, account_num: str, email: str, creds: str
+    ) -> bool:
+        """Whether ``creds`` resolves to slot ``account_num``'s own account.
+
+        May hit the network (the profile endpoint), so never call it under
+        the locks; :meth:`_plan_owner_cached` is the lock-safe lookup for the
+        exact bytes about to be used. Verdicts are cached per lineage, so a
+        lineage costs one lookup per process. Uuid-positive only: a slot
+        without a stored uuid, a failed lookup or an expired token is "not
+        confirmed". A plan is only ever read from a login whose owner is
+        established this way, never from "it matches the stored backup" --
+        the backup itself may have been captured unverified.
+        """
+        if not creds:
+            return False
+        key = self._lineage_key(
+            account_num, email, oauth.credential_fingerprint(creds) or ""
+        )
+        if key in self._plan_owner_verdicts:
+            return self._plan_owner_verdicts[key]
+        token = oauth.extract_access_token(creds)
+        oauth_data = oauth.extract_oauth_data(creds) or {}
+        if not token or oauth.is_oauth_token_expired(oauth_data.get("expiresAt")):
+            return False
+        try:
+            resolved = oauth.fetch_oauth_profile(token)
+        except Exception:
+            return False
+        own = self.account_identity(account_num)
+        r_uuid = ((resolved or {}).get("uuid") or "").strip()
+        if not r_uuid or not own["uuid"]:
+            return False
+        r_org = resolved.get("organizationUuid")
+        match = r_uuid == own["uuid"] and (
+            not r_org or not own["organizationUuid"]
+            or r_org == own["organizationUuid"]
+        )
+        self._plan_owner_verdicts[key] = match
+        return match
+
+    def _plan_owner_cached(self, account_num: str, email: str, creds: str) -> bool:
+        """Lock-safe half of :meth:`_plan_owner_confirmed`: cache lookup only."""
+        return self._plan_owner_verdicts.get(
+            self._lineage_key(
+                account_num, email, oauth.credential_fingerprint(creds) or ""
+            )
+        ) is True
+
     def record_active_plan(self, account_num: str) -> bool:
         """Record the live login's plan on the active slot ``account_num``.
 
-        Only when the live credential is provably this slot's: the same
-        lineage as its stored backup, or a lineage already resolved to it.
-        Anything else (a foreign or unverified credential under this slot's
-        identity) records nothing. Writes the sequence file only when the
-        plan changed or its ``observedAt`` is due a refresh. Returns whether
-        it wrote.
+        Only when the live credential resolves to this slot's own account
+        (see :meth:`_plan_owner_confirmed`); a foreign, unverified or
+        unresolvable credential records nothing. Writes the sequence file
+        only when the plan changed or its ``observedAt`` is due a refresh.
+        Returns whether it wrote.
         """
         account_num = str(account_num)
-        # Everything under the lock, from one sequence read: a switch, add or
-        # slot replacement landing between a check and the write would
-        # otherwise file this login's plan on another account's record.
+        email = self.account_email(account_num)
+        if not email or not self._plan_owner_confirmed(
+            account_num, email, self._read_credentials() or ""
+        ):
+            return False
+        # Re-validate under the lock, from one sequence read and a fresh
+        # credential read: a switch, add, re-login or slot replacement
+        # landing since the lookup would otherwise file this login's plan on
+        # another account's record.
         with FileLock(self.lock_file), claude_credentials_lock():
             data = self._get_sequence_data() or {}
             account = data.get("accounts", {}).get(account_num)
@@ -2018,15 +2078,8 @@ class ClaudeAccountSwitcher:
                 return False
             email = account.get("email", "")
             live = self._read_credentials()
-            if not email or not live:
-                return False
-            fp = oauth.credential_fingerprint(live)
-            backup = self._read_account_credentials(account_num, email)
-            if not (
-                (backup and oauth.credential_fingerprint(backup) == fp)
-                or self._probe_verdicts.get(
-                    self._lineage_key(account_num, email, fp or "")
-                ) is True
+            if not email or not live or not self._plan_owner_cached(
+                account_num, email, live
             ):
                 return False
             if not plans.record_plan(
@@ -6934,6 +6987,14 @@ class ClaudeAccountSwitcher:
                 if force_activate
                 else self._prefetch_live_identity()
             )
+        # Whose login the target's stored credential is: network, so before
+        # the locks. The plan is recorded below only for a confirmed owner.
+        if pre_email:
+            self._plan_owner_confirmed(
+                target_account,
+                pre_email,
+                self._read_account_credentials(target_account, pre_email),
+            )
 
         # Beyond cswap's own lock, hold Claude Code's advisory locks for the
         # whole mutation (including rollback paths): its token refresh runs
@@ -7108,10 +7169,13 @@ class ClaudeAccountSwitcher:
 
                     data["activeAccountNumber"] = int(target_account)
                     data["lastUpdated"] = get_timestamp()
-                    plans.record_plan(
-                        data["accounts"][target_account],
-                        plans.plan_id_from_credentials(target_creds),
-                    )
+                    if self._plan_owner_cached(
+                        target_account, target_email, target_creds
+                    ):
+                        plans.record_plan(
+                            data["accounts"][target_account],
+                            plans.plan_id_from_credentials(target_creds),
+                        )
                     self._write_json(self.sequence_file, data)
                 except Exception:
                     if config_written and rollback_config_text is not None:
@@ -7378,10 +7442,13 @@ class ClaudeAccountSwitcher:
                 # Step 5: Update sequence state
                 data["activeAccountNumber"] = int(target_account)
                 data["lastUpdated"] = get_timestamp()
-                plans.record_plan(
-                    data["accounts"][target_account],
-                    plans.plan_id_from_credentials(target_creds),
-                )
+                if self._plan_owner_cached(
+                    target_account, target_email, target_creds
+                ):
+                    plans.record_plan(
+                        data["accounts"][target_account],
+                        plans.plan_id_from_credentials(target_creds),
+                    )
                 self._write_json(self.sequence_file, data)
                 transaction.record_step("sequence_updated")
 

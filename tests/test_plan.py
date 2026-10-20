@@ -36,6 +36,21 @@ def _seq_text(switcher: ClaudeAccountSwitcher) -> str:
     return switcher.sequence_file.read_text()
 
 
+def _owner(uuid: str, email: str) -> dict:
+    return {"uuid": uuid, "email": email, "organizationUuid": ""}
+
+
+@pytest.fixture
+def profiles(monkeypatch) -> dict:
+    """Access token -> profile the identity lookup resolves it to (absent:
+    the lookup fails)."""
+    table: dict = {}
+    monkeypatch.setattr(
+        "claude_swap.oauth.fetch_oauth_profile", lambda token: table.get(token)
+    )
+    return table
+
+
 class TestPlanMapping:
     @pytest.mark.parametrize(
         ("sub", "tier", "expected"),
@@ -96,8 +111,10 @@ def _switch_setup(temp_home, sample_sequence_data, target_creds):
 class TestSwitchRecordsPlan:
     @pytest.mark.parametrize("force", [False, True])
     def test_switch_records_target_plan(
-        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, force
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
+        profiles, force,
     ):
+        profiles["sk-two"] = _owner("uuid-2", "account2@example.com")
         switcher, patches = _switch_setup(
             temp_home, sample_sequence_data,
             _creds("two", sub="max", tier="default_claude_max_5x"),
@@ -114,9 +131,35 @@ class TestSwitchRecordsPlan:
         text = _seq_text(switcher)
         assert "sk-" not in text and "rt-" not in text
 
-    def test_unrecognised_plan_is_stored_unknown(
-        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
+    @pytest.mark.parametrize(
+        "profile", [None, _owner("uuid-9", "someone@example.com")],
+        ids=["lookup-failed", "foreign"],
+    )
+    @pytest.mark.parametrize("force", [False, True])
+    def test_unconfirmed_owner_switches_without_plan(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
+        profiles, profile, force,
     ):
+        """A stored backup is not proof of whose login it is (it may have
+        been captured unverified): no confirmed owner, no plan."""
+        if profile is not None:
+            profiles["sk-two"] = profile
+        switcher, patches = _switch_setup(
+            temp_home, sample_sequence_data, _creds("two", sub="max", tier="default_claude_max_5x")
+        )
+        try:
+            switcher.switch_to("2", json_output=True, force=force)
+        finally:
+            for p in patches:
+                p.stop()
+        assert switcher._get_sequence_data()["activeAccountNumber"] == 2
+        assert "plan" not in _seq_text(switcher)
+
+    def test_unrecognised_plan_is_stored_unknown(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
+        profiles,
+    ):
+        profiles["sk-two"] = _owner("uuid-2", "account2@example.com")
         switcher, patches = _switch_setup(
             temp_home, sample_sequence_data, _creds("two", sub="team")
         )
@@ -193,7 +236,9 @@ class TestAutoRecordsPlan:
     PRO = _creds("1", sub="pro", tier="default_claude_ai")
 
     @pytest.fixture
-    def h(self, temp_home: Path) -> EngineHarness:
+    def h(self, temp_home: Path, profiles) -> EngineHarness:
+        profiles["sk-1"] = _owner("uuid-1", "a@example.com")
+        profiles["sk-other"] = _owner("uuid-9", "someone@example.com")
         h = EngineHarness(temp_home)
         h.seed(1, "a@example.com")
         h.seed(2, "b@example.com")
@@ -220,6 +265,22 @@ class TestAutoRecordsPlan:
 
     def test_foreign_live_credential_is_not_recorded(self, h):
         self.live.write_text(_creds("other", sub="max", tier="default_claude_max_5x"))
+        self._tick(h)
+        assert "plan" not in h.switcher._get_sequence_data()["accounts"]["1"]
+
+    @pytest.mark.parametrize("owner", [None, "foreign"])
+    def test_unverified_backup_is_not_laundered_by_auto(self, h, profiles, owner):
+        """An unverified add stores someone else's login B in slot 1; live and
+        backup then agree, but agreement is not ownership: auto records B's
+        plan only once B resolves to slot 1's account, never before."""
+        stray = _creds("stray", sub="max", tier="default_claude_max_20x")
+        self.live.write_text(stray)
+        # The identity lookup fails during add, which therefore fails open.
+        with patch("pathlib.Path.home", return_value=self.live.parent.parent):
+            h.switcher.add_account()
+        assert h.switcher._read_account_credentials("1", "a@example.com") == stray
+        if owner == "foreign":
+            profiles["sk-stray"] = _owner("uuid-9", "someone@example.com")
         self._tick(h)
         assert "plan" not in h.switcher._get_sequence_data()["accounts"]["1"]
 
