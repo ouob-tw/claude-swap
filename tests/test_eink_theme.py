@@ -282,6 +282,21 @@ class TestRenderedLightTui:
             await pilot.pause(0.5)
             assert len(app.screen.query(Toast)) == 3
             _assert_eink(app, "toasts")
+            segs = [
+                seg for strip in app.screen._compositor.render_strips()
+                for seg in strip if seg.style is not None
+            ]
+            assert any(
+                seg.style.bold for seg in segs if "warning message" in seg.text
+            )
+            assert any(
+                seg.style.reverse or seg.style.bgcolor.get_truecolor().hex == BLACK
+                for seg in segs if "error message" in seg.text
+            )
+            assert not any(
+                seg.style.bold or seg.style.reverse
+                for seg in segs if "information message" in seg.text
+            )
             await pilot.press("escape")
             await pilot.pause()
             await menu_select(pilot, "add-menu")
