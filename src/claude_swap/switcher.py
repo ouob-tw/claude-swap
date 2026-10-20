@@ -26,7 +26,7 @@ from claude_swap.exceptions import (
     SwitchError,
     ValidationError,
 )
-from claude_swap import oauth, pace
+from claude_swap import oauth, pace, plans
 from claude_swap.claude_locks import claude_config_lock, claude_credentials_lock
 from claude_swap.json_output import (
     SCHEMA_VERSION,
@@ -1774,6 +1774,7 @@ class ClaudeAccountSwitcher:
                     usage=entries[n],
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, n),
+                    plan=plans.plan_view(seq_data.get("accounts", {}).get(n))["id"],
                 )
             )
         return AccountsSnapshot(
@@ -1978,6 +1979,58 @@ class ClaudeAccountSwitcher:
             "organizationUuid": acct.get("organizationUuid", "") or "",
             "uuid": (acct.get("uuid") or "").strip(),
         }
+
+    def account_plan(self, account_num: str) -> dict:
+        """Stored plan for a slot: ``{"id", "label", "multiplier", "observedAt"}``.
+
+        A slot whose plan was never observed reads as ``unknown`` (multiplier 1).
+        """
+        data = self._get_sequence_data() or {}
+        return plans.plan_view(data.get("accounts", {}).get(str(account_num)))
+
+    def account_plan_multiplier(self, account_num: str) -> int:
+        """Quota multiplier of a slot's plan relative to Pro; 1 when unknown."""
+        return self.account_plan(account_num)["multiplier"]
+
+    def record_active_plan(self, account_num: str) -> bool:
+        """Record the live login's plan on the active slot ``account_num``.
+
+        Only when the live credential is provably this slot's: the same
+        lineage as its stored backup, or a lineage already resolved to it.
+        Anything else (a foreign or unverified credential under this slot's
+        identity) records nothing. Writes the sequence file only when the
+        plan changed or its ``observedAt`` is due a refresh. Returns whether
+        it wrote.
+        """
+        account_num = str(account_num)
+        email = self.account_email(account_num)
+        live = self._read_credentials()
+        if not email or not live:
+            return False
+        fp = oauth.credential_fingerprint(live)
+        backup = self._read_account_credentials(account_num, email)
+        if not (
+            (backup and oauth.credential_fingerprint(backup) == fp)
+            or self._probe_verdicts.get(
+                self._lineage_key(account_num, email, fp or "")
+            ) is True
+        ):
+            return False
+        with FileLock(self.lock_file):
+            # Re-check under the lock: a switch landing since the read above
+            # would have the plan filed against the wrong slot.
+            if self.current_account_number() != account_num:
+                return False
+            data = self._get_sequence_data() or {}
+            account = data.get("accounts", {}).get(account_num)
+            if account is None or not plans.record_plan(
+                account,
+                plans.plan_id_from_credentials(live),
+                self._usage_store.clock(),
+            ):
+                return False
+            self._write_json(self.sequence_file, data)
+        return True
 
     def backfill_account_uuid(
         self,
@@ -3599,6 +3652,10 @@ class ClaudeAccountSwitcher:
 
             if alias is not None:
                 seq["accounts"][account_num]["alias"] = alias
+            plans.record_plan(
+                seq["accounts"][account_num],
+                plans.plan_id_from_credentials(current_creds),
+            )
 
             seq["activeAccountNumber"] = int(account_num)
             seq["lastUpdated"] = get_timestamp()
@@ -3752,6 +3809,10 @@ class ClaudeAccountSwitcher:
         carried_alias = alias if alias is not None else existing_alias
         if carried_alias:
             data["accounts"][account_num]["alias"] = carried_alias
+        plans.record_plan(
+            data["accounts"][account_num],
+            plans.plan_id_from_credentials(current_creds),
+        )
         if int(account_num) not in data["sequence"]:
             data["sequence"].append(int(account_num))
             data["sequence"].sort()
@@ -5552,6 +5613,9 @@ class ClaudeAccountSwitcher:
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, str(num)),
                     login_expires_at=oauth.login_expires_at_iso(creds),
+                    plan=plans.plan_view(
+                        seq_data.get("accounts", {}).get(str(num))
+                    ),
                 )
             )
         payload = {
@@ -5616,7 +5680,8 @@ class ClaudeAccountSwitcher:
                 markers += f" {bold_accent('(active)')}"
             if self._disabled_from_data(seq_data, str(num)):
                 markers += f" {muted('(disabled)')}"
-            print(f"  {num}: {label} {muted(f'[{tag}]')}{markers}")
+            plan = plans.plan_view(seq_data.get("accounts", {}).get(str(num)))
+            print(f"  {num}: {label} {muted(f'[{tag}]')} {plan['label']}{markers}")
             for line in _usage_entry_lines(entries[str(num)]):
                 print(f"     {line}")
 
@@ -7029,6 +7094,10 @@ class ClaudeAccountSwitcher:
 
                     data["activeAccountNumber"] = int(target_account)
                     data["lastUpdated"] = get_timestamp()
+                    plans.record_plan(
+                        data["accounts"][target_account],
+                        plans.plan_id_from_credentials(target_creds),
+                    )
                     self._write_json(self.sequence_file, data)
                 except Exception:
                     if config_written and rollback_config_text is not None:
@@ -7295,6 +7364,10 @@ class ClaudeAccountSwitcher:
                 # Step 5: Update sequence state
                 data["activeAccountNumber"] = int(target_account)
                 data["lastUpdated"] = get_timestamp()
+                plans.record_plan(
+                    data["accounts"][target_account],
+                    plans.plan_id_from_credentials(target_creds),
+                )
                 self._write_json(self.sequence_file, data)
                 transaction.record_step("sequence_updated")
 

@@ -12,6 +12,7 @@ import math
 from datetime import datetime, timezone
 
 from claude_swap import oauth, pace
+from claude_swap.plans import plan_view
 
 # Bump only on a breaking change to any payload shape. Scripts key off this.
 SCHEMA_VERSION = 1
@@ -318,6 +319,7 @@ def account_row(
     alias: str = "",
     disabled: bool = False,
     login_expires_at: str | None = None,
+    plan: dict | None = None,
 ) -> dict:
     """A full account row for ``--list``. ``backoff_until`` is the live
     backoff only; a lapsed one is the caller's to withhold."""
@@ -334,6 +336,8 @@ def account_row(
     }
     if alias:
         row["alias"] = alias
+    # Additive field: the slot's recorded plan, ``unknown`` when never seen.
+    row["plan"] = plan if plan is not None else plan_view(None)
     # Additive field: present only when the slot is held out of rotation, so
     # existing consumers keying on the base schema are unaffected.
     if disabled:

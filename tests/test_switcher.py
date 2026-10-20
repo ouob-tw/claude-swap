@@ -1446,7 +1446,7 @@ class TestListAccountsUsage:
             switcher.list_accounts()
 
         output = capsys.readouterr().out
-        assert "test@example.com [personal] (active)" in output
+        assert "test@example.com [personal] Unknown (active)" in output
         assert "account2@example.com" in output
         assert "├ 5h:" in output
         assert "└ 7d:" in output
@@ -1474,7 +1474,7 @@ class TestListAccountsUsage:
             switcher.list_accounts()
 
         output = capsys.readouterr().out
-        assert "  1: dev (test@example.com) [personal] (active)" in output
+        assert "  1: dev (test@example.com) [personal] Unknown (active)" in output
         # unaliased account keeps rendering plain email, no spurious parens
         assert "  2: account2@example.com" in output
         assert "(account2@example.com)" not in output

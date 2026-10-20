@@ -140,6 +140,7 @@ class AccountSnapshot:
     usage: UsageEntry
     alias: str = ""
     disabled: bool = False  # held out of auto-rotation (still a valid explicit target)
+    plan: str = "unknown"  # plan id (see claude_swap.plans)
 
     @property
     def display_tag(self) -> str:
